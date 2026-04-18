@@ -1,0 +1,27 @@
+[package]
+name = "diktat"
+version = "0.1.0"
+description = "Lokale Transkriptions-App mit Whisper + Gemma 4"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "diktat_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+symphonia = { version = "0.5", features = ["mp3", "wav", "flac", "ogg", "isomp4", "aac"] }
+rubato = "0.15"
+whisper-rs = { version = "0.16", features = [] }
+chrono = { version = "0.4", features = ["serde"] }

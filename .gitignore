@@ -1,0 +1,26 @@
+# Build output
+dist/
+target/
+
+# Dependencies
+node_modules/
+
+# Whisper model (1.6 GB - separat herunterladen)
+models/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log

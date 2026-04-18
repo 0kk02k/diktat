@@ -1,0 +1,13 @@
+Zusammenfassung und Handlungsempfehlung
+Die Konzeption einer lokalen Transkriptions-App auf einem 16-GB-Laptop mit iGPU ist technologisch anspruchsvoll, aber mit dem aktuellen Stand der Modelloptimierung (April 2026) und Hardwarebeschleunigung realistisch umsetzbar.
+
+Technologie-Stack: Wählen Sie Tauri für die Benutzeroberfläche und OpenVINO als Inferenz-Backend, um die Intel iGPU und NPU optimal auszunutzen.   
+
+Modellkombination: Verwenden Sie Whisper Large-v3-Turbo (quantisiert auf 5-Bit) für die Spracherkennung und Gemma 4 E4B (quantisiert auf 4-Bit) für die Textanalyse.   
+
+Ausführung: Implementieren Sie einen parallelen Workflow mit Chunking. Das System sollte Audio in 30-Sekunden-Fenstern transkribieren, während Gemma 4 die vorangegangenen Chunks im Hintergrund analysiert.   
+
+Speicheroptimierung: Begrenzen Sie den Kontext auf maximal 32k Token und nutzen Sie das -np 1 Flag, um unnötigen VRAM-Verbrauch durch parallele Inferenz-Slots zu vermeiden.   
+
+Durch diese Architektur wird eine private, offline-fähige Lösung geschaffen, die in puncto Latenz und Intelligenz mit Cloud-Diensten konkurrieren kann, ohne die Hardware-Ressourcen des Benutzers zu überfordern.   
+

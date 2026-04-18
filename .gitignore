@@ -8,6 +8,9 @@ node_modules/
 # Whisper model (1.6 GB - separat herunterladen)
 models/
 
+# Aufnahmen (werden zur Laufzeit erstellt)
+recordings/
+
 # OS files
 .DS_Store
 Thumbs.db

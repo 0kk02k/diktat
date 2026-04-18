@@ -4,10 +4,11 @@ use tracing::{info, warn};
 mod audio;
 mod export;
 mod ollama;
+mod recording;
 mod whisper;
 mod workflow;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[tauri::command]
 async fn check_ollama_status() -> Result<serde_json::Value, String> {
@@ -92,43 +93,14 @@ async fn check_whisper_model() -> Result<serde_json::Value, String> {
     }))
 }
 
-/// Speichert eine Base64-kodierte Audio-Aufnahme als WAV-Datei
-#[tauri::command]
-async fn save_recording(data: String, filename: String) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-
-    let audio_bytes = BASE64.decode(&data)
-        .map_err(|e| format!("Base64-Dekodierung fehlgeschlagen: {}", e))?;
-
-    // Aufnahmen-Verzeichnis erstellen
-    let recordings_dir = std::path::Path::new("recordings");
-    if !recordings_dir.exists() {
-        std::fs::create_dir_all(recordings_dir)
-            .map_err(|e| format!("Konnte recordings-Verzeichnis nicht erstellen: {}", e))?;
-    }
-
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let fname = if filename.is_empty() {
-        format!("aufnahme_{}.wav", timestamp)
-    } else {
-        filename
-    };
-    let path = recordings_dir.join(&fname);
-
-    std::fs::write(&path, &audio_bytes)
-        .map_err(|e| format!("Konnte Aufnahme nicht speichern: {}", e))?;
-
-    let path_str = path.to_string_lossy().to_string();
-    info!("Aufnahme gespeichert: {} ({} Bytes)", path_str, audio_bytes.len());
-
-    Ok(path_str)
-}
+// (save_recording entfernt -- Aufnahme jetzt nativ in Rust via cpal)
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(whisper::WhisperState::new()))
+        .manage(Arc::new(Mutex::new(recording::RecordingState::new())))
         .invoke_handler(tauri::generate_handler![
             check_ollama_status,
             get_ollama_models,
@@ -137,7 +109,8 @@ pub fn run() {
             analyze_transcript_stream,
             load_audio_file,
             prepare_chunks,
-            save_recording,
+            recording::start_recording,
+            recording::stop_recording,
             whisper::transcribe_audio,
             workflow::run_workflow,
             export::export_result,

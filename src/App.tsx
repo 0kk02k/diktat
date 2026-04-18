@@ -140,6 +140,13 @@ function App() {
   const [language, setLanguage] = useState("de");
   const [showSettings, setShowSettings] = useState(false);
 
+  // Recording
+  const [recording, setRecording] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
   // Tab for results area
   const [activeTab, setActiveTab] = useState<"transcript" | "analysis">("transcript");
 
@@ -472,6 +479,126 @@ function App() {
     }
   }
 
+  // --- Recording ---
+
+  async function startRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+
+        // WAV konvertieren: AudioContext dekodiert, dann PCM als WAV kodieren
+        const arrayBuffer = await blob.arrayBuffer();
+        const audioContext = new AudioContext({ sampleRate: 16000 });
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+        const wavBuffer = encodeWAV(audioBuffer);
+        const base64 = arrayBufferToBase64(wavBuffer);
+
+        try {
+          const savedPath = (await invoke("save_recording", {
+            data: base64,
+            filename: "",
+          })) as string;
+          console.log("[Diktat] Aufnahme gespeichert:", savedPath);
+          await handleAudioFile(savedPath);
+        } catch (e) {
+          setAudioError(`Aufnahme konnte nicht gespeichert werden: ${e}`);
+          console.error("[Diktat] Save-Error:", e);
+        }
+
+        audioContext.close();
+      };
+
+      mediaRecorder.start();
+      setRecording(true);
+      setRecordingTime(0);
+
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingTime((prev) => prev + 1);
+      }, 1000);
+    } catch (e) {
+      setAudioError(`Mikrofon-Zugriff verweigert oder nicht verfuegbar: ${e}`);
+      console.error("[Diktat] Mikrofon-Fehler:", e);
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+    setRecording(false);
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  }
+
+  function encodeWAV(audioBuffer: AudioBuffer): ArrayBuffer {
+    const numChannels = 1;
+    const sampleRate = audioBuffer.sampleRate;
+    const numSamples = audioBuffer.length;
+    const bitsPerSample = 16;
+    const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+    const blockAlign = (numChannels * bitsPerSample) / 8;
+    const dataSize = numSamples * blockAlign;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    // WAV Header
+    writeString(view, 0, "RIFF");
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(view, 8, "WAVE");
+    writeString(view, 12, "fmt ");
+    view.setUint32(16, 16, true); // Subchunk1Size
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeString(view, 36, "data");
+    view.setUint32(40, dataSize, true);
+
+    // PCM Daten (Mono-Downmix)
+    const channelData = audioBuffer.getChannelData(0);
+    let offset = 44;
+    for (let i = 0; i < numSamples; i++) {
+      let sample = channelData[i];
+      sample = Math.max(-1, Math.min(1, sample));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+
+    return buffer;
+  }
+
+  function writeString(view: DataView, offset: number, str: string) {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  }
+
+  function arrayBufferToBase64(buffer: ArrayBuffer): string {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
   // --- Export ---
 
   async function handleExport(format: string) {
@@ -612,36 +739,63 @@ function App() {
         </div>
       )}
 
-      {/* Audio Drop Zone */}
-      <div
-        className={`drop-zone ${dragOver ? "drag-over" : ""} ${audioLoading ? "loading" : ""}`}
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onClick={openFileDialog}
-      >
-        {audioLoading ? (
-          <p>Audio wird geladen und chunked...</p>
-        ) : audioInfo ? (
-          <div>
-            <p style={{ fontWeight: "bold" }}>{audioInfo.filename}</p>
-            <p>
-              {formatDuration(audioInfo.duration_secs)} |{" "}
-              {audioInfo.sample_rate / 1000} kHz | {audioInfo.channels} Kanal(e) | {formatFileSize(audioInfo.file_size)}
-            </p>
-            <p style={{ marginTop: "0.5rem", color: "#4a90d9" }}>
-              {chunks.length} Chunks vorbereitet (30s Fenster)
-            </p>
-            <p style={{ fontSize: "0.75rem", marginTop: "0.5rem", color: "#888" }}>
-              Klicken oder andere Datei ablegen zum Wechseln
-            </p>
-          </div>
-        ) : (
-          <>
-            <p className="drop-zone-title">Audio-Datei hier ablegen oder klicken</p>
-            <p className="drop-zone-hint">WAV, MP3, FLAC, OGG, M4A</p>
-          </>
-        )}
+      {/* Audio Section: Recording + Drop Zone */}
+      <div className="audio-section">
+        {/* Recording Controls */}
+        <div className="recording-controls">
+          {!recording ? (
+            <button
+              className="record-btn"
+              onClick={startRecording}
+              disabled={isBusy}
+              title="Aufnahme starten"
+            >
+              <span className="record-dot" />
+              Aufnehmen
+            </button>
+          ) : (
+            <button
+              className="record-btn recording"
+              onClick={stopRecording}
+              title="Aufnahme stoppen"
+            >
+              <span className="record-dot active" />
+              Stop {formatDuration(recordingTime)}
+            </button>
+          )}
+        </div>
+
+        {/* Audio Drop Zone */}
+        <div
+          className={`drop-zone ${dragOver ? "drag-over" : ""} ${audioLoading ? "loading" : ""}`}
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onClick={openFileDialog}
+        >
+          {audioLoading ? (
+            <p>Audio wird geladen und chunked...</p>
+          ) : audioInfo ? (
+            <div>
+              <p style={{ fontWeight: "bold" }}>{audioInfo.filename}</p>
+              <p>
+                {formatDuration(audioInfo.duration_secs)} |{" "}
+                {audioInfo.sample_rate / 1000} kHz | {audioInfo.channels} Kanal(e) | {formatFileSize(audioInfo.file_size)}
+              </p>
+              <p style={{ marginTop: "0.5rem", color: "#4a90d9" }}>
+                {chunks.length} Chunks vorbereitet (30s Fenster)
+              </p>
+              <p style={{ fontSize: "0.75rem", marginTop: "0.5rem", color: "#888" }}>
+                Klicken oder andere Datei ablegen zum Wechseln
+              </p>
+            </div>
+          ) : (
+            <>
+              <p className="drop-zone-title">Audio-Datei hier ablegen oder klicken</p>
+              <p className="drop-zone-hint">WAV, MP3, FLAC, OGG, M4A</p>
+            </>
+          )}
+        </div>
       </div>
 
       {audioError && (

@@ -25,3 +25,4 @@ symphonia = { version = "0.5", features = ["mp3", "wav", "flac", "ogg", "isomp4"
 rubato = "0.15"
 whisper-rs = { version = "0.16", features = [] }
 chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"

@@ -211,6 +211,105 @@ body {
   }
 }
 
+/* --- Audio Section (Recording + Drop Zone) --- */
+
+.audio-section {
+  display: flex;
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.recording-controls {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.record-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  background: #dc3545;
+  border-color: #dc3545;
+  color: white;
+  font-weight: bold;
+  font-size: 0.95rem;
+  padding: 0.8rem 1.2rem;
+  border-radius: 12px;
+  min-width: 140px;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+
+.record-btn:hover:not(:disabled) {
+  background: #c82333;
+}
+
+.record-btn:disabled {
+  background: #aaa;
+  cursor: not-allowed;
+}
+
+.record-btn.recording {
+  background: #28a745;
+  border-color: #28a745;
+  animation: record-pulse 1.5s ease-in-out infinite;
+}
+
+.record-btn.recording:hover {
+  background: #218838;
+}
+
+@keyframes record-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(220, 53, 69, 0); }
+}
+
+.record-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: white;
+}
+
+.record-dot.active {
+  background: white;
+  animation: dot-blink 1s ease-in-out infinite;
+}
+
+@keyframes dot-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.audio-section .drop-zone {
+  flex: 1;
+}
+
+@media (max-width: 600px) {
+  .audio-section {
+    flex-direction: column;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .record-btn {
+    background: #b02a37;
+    border-color: #b02a37;
+  }
+  .record-btn:hover:not(:disabled) {
+    background: #a02030;
+  }
+  .record-btn.recording {
+    background: #218838;
+    border-color: #218838;
+  }
+}
+
 /* --- Drop Zone --- */
 
 .drop-zone {

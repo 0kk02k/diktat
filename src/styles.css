@@ -1,5 +1,33 @@
+@font-face {
+  font-family: "OpenDyslexic Nerd Font";
+  src: url("./fonts/OpenDyslexicNerdFontPropo-Regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "OpenDyslexic Nerd Font";
+  src: url("./fonts/OpenDyslexicNerdFontPropo-Bold.otf") format("opentype");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "OpenDyslexic Nerd Font";
+  src: url("./fonts/OpenDyslexicNerdFontPropo-Italic.otf") format("opentype");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "OpenDyslexic Nerd Font";
+  src: url("./fonts/OpenDyslexicNerdFontPropo-BoldItalic.otf") format("opentype");
+  font-weight: 700;
+  font-style: italic;
+}
+
 ::root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: "OpenDyslexic Nerd Font", Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 

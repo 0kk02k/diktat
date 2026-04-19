@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter};
-use tracing::{info, warn};
+use tracing::{info, warn, debug, error};
 
 const OLLAMA_BASE_URL: &str = "http://localhost:11434";
-const DEFAULT_MODEL: &str = "gemma3:4b";
+const DEFAULT_MODEL: &str = "gemma4:latest";
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_NUM_CTX: u32 = 32768;
 /// Keep-Alive: Wie lange Ollama das Modell nach letzter Anfrage im Speicher behaelt
@@ -14,17 +14,32 @@ const DEFAULT_NUM_CTX: u32 = 32768;
 const DEFAULT_KEEP_ALIVE: &str = "5m";
 
 /// Globaler HTTP-Client mit Connection-Pooling
+/// Wird mit dem Analyse-Timeout erstellt (300s). Fuer kurze Checks
+/// wird ein separater Client verwendet.
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
-fn get_http_client(timeout_secs: u64) -> &'static Client {
+/// Kurzzeit-Client fuer Status-Checks (5s Timeout)
+static CHECK_CLIENT: OnceLock<Client> = OnceLock::new();
+
+fn get_http_client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {
         Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .pool_max_idle_per_host(2)
             .pool_idle_timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(5))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("HTTP-Client konnte nicht erstellt werden")
+    })
+}
+
+fn get_check_client() -> &'static Client {
+    CHECK_CLIENT.get_or_init(|| {
+        Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Check-Client konnte nicht erstellt werden")
     })
 }
 
@@ -138,7 +153,7 @@ impl AnalysisTask {
 
 /// Prueft ob Ollama erreichbar ist und gibt Status + Modelle zurueck
 pub async fn check_status() -> Result<serde_json::Value, String> {
-    let client = get_http_client(5);
+    let client = get_check_client();
 
     let response = client
         .get(format!("{}/api/tags", OLLAMA_BASE_URL))
@@ -171,32 +186,42 @@ pub async fn analyze(transcript: &str, task: &str) -> Result<String, String> {
     let system_prompt = analysis_task.system_prompt();
 
     info!(
-        "Starte Analyse: {} ({} Zeichen)",
+        "Starte Analyse: {} ({} Zeichen, Task: {})",
         analysis_task.label(),
-        transcript.len()
+        transcript.len(),
+        task
+    );
+    debug!(
+        "Analyse User-Message (erste 200 Zeichen): {:?}",
+        &transcript[..transcript.len().min(200)]
     );
 
-    let client = get_http_client(DEFAULT_TIMEOUT_SECS);
+    let client = get_http_client();
+
+    let request_body = json!({
+        "model": DEFAULT_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": transcript}
+        ],
+        "stream": false,
+        "keep_alive": DEFAULT_KEEP_ALIVE,
+        "options": {
+            "num_ctx": DEFAULT_NUM_CTX,
+            "temperature": 0.3,
+            "top_p": 0.9
+        }
+    });
+    info!("Ollama Request: model={}, system_prompt_len={}, user_msg_len={}",
+        DEFAULT_MODEL, system_prompt.len(), transcript.len());
 
     let response = client
         .post(format!("{}/api/chat", OLLAMA_BASE_URL))
-        .json(&json!({
-            "model": DEFAULT_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": transcript}
-            ],
-            "stream": false,
-            "keep_alive": DEFAULT_KEEP_ALIVE,
-            "options": {
-                "num_ctx": DEFAULT_NUM_CTX,
-                "temperature": 0.3,
-                "top_p": 0.9
-            }
-        }))
+        .json(&request_body)
         .send()
         .await
         .map_err(|e| {
+            error!("Ollama Request-Fehler: {} (connect={}, timeout={})", e, e.is_connect(), e.is_timeout());
             if e.is_connect() {
                 "Ollama ist nicht erreichbar. Bitte starte Ollama mit 'ollama serve'.".to_string()
             } else if e.is_timeout() {
@@ -206,10 +231,15 @@ pub async fn analyze(transcript: &str, task: &str) -> Result<String, String> {
             }
         })?;
 
+    let status = response.status();
+    info!("Ollama Response Status: {}", status);
+
     let body: serde_json::Value = response
         .json()
         .await
         .map_err(|e| format!("Antwort konnte nicht gelesen werden: {}", e))?;
+
+    info!("Ollama Response Keys: {:?}", body.as_object().map(|o| o.keys().collect::<Vec<_>>()));
 
     let content = body["message"]["content"]
         .as_str()
@@ -247,32 +277,42 @@ pub async fn analyze_stream(
     let system_prompt = analysis_task.system_prompt();
 
     info!(
-        "Starte Streaming-Analyse: {} ({} Zeichen)",
+        "Starte Streaming-Analyse: {} ({} Zeichen, Task: {})",
         analysis_task.label(),
-        transcript.len()
+        transcript.len(),
+        task
+    );
+    debug!(
+        "Stream User-Message (erste 200 Zeichen): {:?}",
+        &transcript[..transcript.len().min(200)]
     );
 
-    let client = get_http_client(DEFAULT_TIMEOUT_SECS);
+    let client = get_http_client();
+
+    let request_body = json!({
+        "model": DEFAULT_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": transcript}
+        ],
+        "stream": true,
+        "keep_alive": DEFAULT_KEEP_ALIVE,
+        "options": {
+            "num_ctx": DEFAULT_NUM_CTX,
+            "temperature": 0.3,
+            "top_p": 0.9
+        }
+    });
+    info!("Ollama Stream Request: model={}, system_prompt_len={}, user_msg_len={}",
+        DEFAULT_MODEL, system_prompt.len(), transcript.len());
 
     let response = client
         .post(format!("{}/api/chat", OLLAMA_BASE_URL))
-        .json(&json!({
-            "model": DEFAULT_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": transcript}
-            ],
-            "stream": true,
-            "keep_alive": DEFAULT_KEEP_ALIVE,
-            "options": {
-                "num_ctx": DEFAULT_NUM_CTX,
-                "temperature": 0.3,
-                "top_p": 0.9
-            }
-        }))
+        .json(&request_body)
         .send()
         .await
         .map_err(|e| {
+            error!("Ollama Stream Request-Fehler: {} (connect={}, timeout={})", e, e.is_connect(), e.is_timeout());
             if e.is_connect() {
                 "Ollama ist nicht erreichbar. Bitte starte Ollama mit 'ollama serve'.".to_string()
             } else if e.is_timeout() {
@@ -281,6 +321,9 @@ pub async fn analyze_stream(
                 format!("Ollama-Fehler: {}", e)
             }
         })?;
+
+    let status = response.status();
+    info!("Ollama Stream Response Status: {}", status);
 
     // Streaming: Zeile fuer Zeile lesen
     let bytes = response

@@ -32,6 +32,19 @@ async fn analyze_transcript_stream(
     transcript: String,
     task: String,
 ) -> Result<String, String> {
+    tracing::info!(
+        "analyze_transcript_stream aufgerufen: task={}, transcript_len={}",
+        task,
+        transcript.len()
+    );
+    if transcript.is_empty() {
+        tracing::warn!("analyze_transcript_stream: transcript ist LEER!");
+    } else {
+        tracing::info!(
+            "analyze_transcript_stream: transcript_preview=\"{}\"",
+            &transcript[..transcript.len().min(100)]
+        );
+    }
     ollama::analyze_stream(&app, &transcript, &task).await
 }
 
@@ -111,6 +124,10 @@ pub fn run() {
             prepare_chunks,
             recording::start_recording,
             recording::stop_recording,
+            recording::set_recording_gain,
+            recording::get_recording_gain,
+            recording::start_monitoring,
+            recording::stop_monitoring,
             whisper::transcribe_audio,
             workflow::run_workflow,
             export::export_result,

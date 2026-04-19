@@ -3,6 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 
+// Prueft ob wir in einer Tauri-Umgebung laufen
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
 // --- Types ---
 
 interface AudioInfo {
@@ -144,6 +147,10 @@ function App() {
   const [recording, setRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [gain, setGain] = useState(1.0);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const levelHistoryRef = useRef<number[]>([]);
 
   // Tab for results area
   const [activeTab, setActiveTab] = useState<"transcript" | "analysis">("transcript");
@@ -151,102 +158,134 @@ function App() {
   // --- Event Listeners ---
 
   useEffect(() => {
-    checkOllama();
-    checkWhisper();
+    if (isTauri) {
+      checkOllama();
+      checkWhisper();
+      // Audio-Monitoring sofort starten (Pegel anzeigen)
+      invoke("start_monitoring").catch((e) =>
+        console.warn("[Diktat] Monitoring konnte nicht gestartet werden:", e)
+      );
+    }
 
     // Startup-Warnings vom Backend
-    const unlistenStartupWarning = listen("startup-warning", (event: any) => {
-      const data = event.payload as { component: string; message: string };
-      setStartupWarnings((prev) => [...prev, data.message]);
-    });
+    const unlistenStartupWarning = isTauri
+      ? listen("startup-warning", (event: any) => {
+          const data = event.payload as { component: string; message: string };
+          setStartupWarnings((prev) => [...prev, data.message]);
+        })
+      : Promise.resolve(() => {});
 
-    const unlistenProgress = listen("transcription-progress", (event) => {
-      const data = event.payload as any;
-      setTranscriptionProgress(data.progress_percent);
-      setCurrentChunkIndex(data.chunk_index);
+    const unlistenProgress = isTauri
+      ? listen("transcription-progress", (event) => {
+          const data = event.payload as any;
+          setTranscriptionProgress(data.progress_percent);
+          setCurrentChunkIndex(data.chunk_index);
 
-      setChunkStatuses((prev) => {
-        const updated = { ...prev };
-        for (let i = 0; i <= data.chunk_index; i++) {
-          updated[i] = "done";
-        }
-        if (data.chunk_index + 1 < data.total_chunks) {
-          updated[data.chunk_index + 1] = "transcribing";
-        }
-        return updated;
-      });
+          setChunkStatuses((prev) => {
+            const updated = { ...prev };
+            for (let i = 0; i <= data.chunk_index; i++) {
+              updated[i] = "done";
+            }
+            if (data.chunk_index + 1 < data.total_chunks) {
+              updated[data.chunk_index + 1] = "transcribing";
+            }
+            return updated;
+          });
 
-      if (data.current_text) {
-        setTranscript((prev) => prev ? prev + " " + data.current_text : data.current_text);
-      }
-    });
-
-    const unlistenComplete = listen("transcription-complete", (event) => {
-      const data = event.payload as TranscriptionResult;
-      setTranscript(data.full_text);
-      setTranscriptChunks(data.chunks);
-      setTranscribing(false);
-      setTranscriptionProgress(100);
-      setChunkStatuses((prev) => {
-        const updated = { ...prev };
-        for (let i = 0; i < data.chunks.length; i++) {
-          updated[i] = "done";
-        }
-        return updated;
-      });
-      setActiveTab("transcript");
-    });
-
-    const unlistenToken = listen("analysis-token", (event) => {
-      const data = event.payload as any;
-      setStreamingResult((prev) => prev + data.token);
-    });
-
-    const unlistenAnalysisComplete = listen("analysis-complete", (event) => {
-      const data = event.payload as any;
-      setResult(data.result);
-      setLoading(false);
-      setActiveTask("");
-      setActiveTab("analysis");
-    });
-
-    const unlistenWorkflowState = listen("workflow-state", (event) => {
-      const data = event.payload as WorkflowState;
-      setWorkflowPhase(data.phase);
-      if (data.transcript) setTranscript(data.transcript);
-      if (data.analysis_result) {
-        setStreamingResult(data.analysis_result);
-        setResult(data.analysis_result);
-      }
-      if (data.chunks_done > 0) {
-        setTranscriptionProgress((data.chunks_done / data.total_chunks) * 100);
-        setCurrentChunkIndex(data.chunks_done - 1);
-        setChunkStatuses((prev) => {
-          const updated = { ...prev };
-          for (let i = 0; i < data.chunks_done; i++) {
-            updated[i] = "done";
+          if (data.current_text) {
+            setTranscript((prev) => prev ? prev + " " + data.current_text : data.current_text);
           }
-          if (data.chunks_done < data.total_chunks) {
-            updated[data.chunks_done] = "transcribing";
-          }
-          return updated;
-        });
-      }
-    });
+        })
+      : Promise.resolve(() => {});
 
-    const unlistenWorkflowComplete = listen("workflow-complete", (event) => {
-      const data = event.payload as any;
-      setTranscript(data.transcript);
-      setResult(data.analysis);
-      setStreamingResult(data.analysis);
-      setWorkflowRunning(false);
-      setWorkflowPhase("Complete");
-      setTranscribing(false);
-      setTranscriptionProgress(100);
-      setLoading(false);
-      setActiveTask("");
-      setActiveTab("analysis");
-    });
+    const unlistenComplete = isTauri
+      ? listen("transcription-complete", (event) => {
+          const data = event.payload as TranscriptionResult;
+          setTranscript(data.full_text);
+          setTranscriptChunks(data.chunks);
+          setTranscribing(false);
+          setTranscriptionProgress(100);
+          setChunkStatuses((prev) => {
+            const updated = { ...prev };
+            for (let i = 0; i < data.chunks.length; i++) {
+              updated[i] = "done";
+            }
+            return updated;
+          });
+          setActiveTab("transcript");
+        })
+      : Promise.resolve(() => {});
+
+    const unlistenToken = isTauri
+      ? listen("analysis-token", (event) => {
+          const data = event.payload as any;
+          setStreamingResult((prev) => prev + data.token);
+        })
+      : Promise.resolve(() => {});
+
+    const unlistenAnalysisComplete = isTauri
+      ? listen("analysis-complete", (event) => {
+          const data = event.payload as any;
+          setResult(data.result);
+          setLoading(false);
+          setActiveTask("");
+          setActiveTab("analysis");
+        })
+      : Promise.resolve(() => {});
+
+    const unlistenWorkflowState = isTauri
+      ? listen("workflow-state", (event) => {
+          const data = event.payload as WorkflowState;
+          setWorkflowPhase(data.phase);
+          if (data.transcript) setTranscript(data.transcript);
+          if (data.analysis_result) {
+            setStreamingResult(data.analysis_result);
+            setResult(data.analysis_result);
+          }
+          if (data.chunks_done > 0) {
+            setTranscriptionProgress((data.chunks_done / data.total_chunks) * 100);
+            setCurrentChunkIndex(data.chunks_done - 1);
+            setChunkStatuses((prev) => {
+              const updated = { ...prev };
+              for (let i = 0; i < data.chunks_done; i++) {
+                updated[i] = "done";
+              }
+              if (data.chunks_done < data.total_chunks) {
+                updated[data.chunks_done] = "transcribing";
+              }
+              return updated;
+            });
+          }
+        })
+      : Promise.resolve(() => {});
+
+    const unlistenWorkflowComplete = isTauri
+      ? listen("workflow-complete", (event) => {
+          const data = event.payload as any;
+          setTranscript(data.transcript);
+          setResult(data.analysis);
+          setStreamingResult(data.analysis);
+          setWorkflowRunning(false);
+          setWorkflowPhase("Complete");
+          setTranscribing(false);
+          setTranscriptionProgress(100);
+          setLoading(false);
+          setActiveTask("");
+          setActiveTab("analysis");
+        })
+      : Promise.resolve(() => {});
+
+    const unlistenAudioLevel = isTauri
+      ? listen("audio-level", (event) => {
+          const data = event.payload as any;
+          setAudioLevel(data.level);
+          // VU-Meter History fuer Canvas
+          levelHistoryRef.current.push(data.level);
+          if (levelHistoryRef.current.length > 200) {
+            levelHistoryRef.current.shift();
+          }
+        })
+      : Promise.resolve(() => {});
 
     return () => {
       unlistenProgress.then((fn) => fn());
@@ -256,6 +295,7 @@ function App() {
       unlistenWorkflowState.then((fn) => fn());
       unlistenWorkflowComplete.then((fn) => fn());
       unlistenStartupWarning.then((fn) => fn());
+      unlistenAudioLevel.then((fn) => fn());
     };
   }, []);
 
@@ -286,6 +326,7 @@ function App() {
   // --- Actions ---
 
   async function checkOllama() {
+    if (!isTauri) return;
     try {
       const res = (await invoke("check_ollama_status")) as any;
       setOllamaStatus("ok");
@@ -299,6 +340,7 @@ function App() {
   }
 
   async function checkWhisper() {
+    if (!isTauri) return;
     try {
       const res = (await invoke("check_whisper_model")) as any;
       if (res.valid) {
@@ -315,6 +357,7 @@ function App() {
   }
 
   async function handleAudioFile(filePath: string) {
+    if (!isTauri) return;
     setAudioLoading(true);
     setAudioError("");
     setAudioInfo(null);
@@ -350,7 +393,7 @@ function App() {
   }
 
   async function startTranscription() {
-    if (!selectedFile) return;
+    if (!selectedFile || !isTauri) return;
     setTranscribing(true);
     setTranscriptionProgress(0);
     setCurrentChunkIndex(0);
@@ -382,6 +425,7 @@ function App() {
   }
 
   async function openFileDialog() {
+    if (!isTauri) return;
     const selected = await open({
       multiple: false,
       filters: [{ name: "Audio", extensions: ["wav", "mp3", "flac", "ogg", "m4a", "aac", "wma", "opus"] }],
@@ -417,7 +461,8 @@ function App() {
   }, []);
 
   async function runAnalysis(task: string) {
-    if (!transcript.trim()) return;
+    if (!transcript.trim() || !isTauri) return;
+    console.log(`[Diktat] runAnalysis: task=${task}, transcript_len=${transcript.length}, transcript_preview="${transcript.substring(0, 100)}"`);
     setLoading(true);
     setActiveTask(task);
     setResult("");
@@ -437,7 +482,7 @@ function App() {
   }
 
   async function runWorkflow() {
-    if (!selectedFile) return;
+    if (!selectedFile || !isTauri) return;
     setWorkflowRunning(true);
     setTranscribing(true);
     setLoading(true);
@@ -477,15 +522,87 @@ function App() {
     }
   }
 
+  // VU-Meter Canvas zeichnen
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const w = canvas.width;
+    const h = canvas.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Hintergrund
+    ctx.fillStyle = "#1a1a1a";
+    ctx.fillRect(0, 0, w, h);
+
+    // Skalenstriche
+    ctx.strokeStyle = "#333";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 10; i++) {
+      const x = (i / 10) * w;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+
+    // Level-Balken
+    const barWidth = w * audioLevel;
+    const gradient = ctx.createLinearGradient(0, 0, w, 0);
+    gradient.addColorStop(0, "#28a745");
+    gradient.addColorStop(0.6, "#ffc107");
+    gradient.addColorStop(0.85, "#fd7e14");
+    gradient.addColorStop(1, "#dc3545");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, barWidth, h);
+
+    // Peak-History Kurve (Waveform)
+    const history = levelHistoryRef.current;
+    if (history.length > 1) {
+      ctx.strokeStyle = "rgba(74, 144, 217, 0.6)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let i = 0; i < history.length; i++) {
+        const x = (i / 200) * w;
+        const y = h - history[i] * h;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    // dB-Wert anzeigen
+    const db = Math.round(audioLevel * 60 - 60);
+    ctx.fillStyle = "#fff";
+    ctx.font = "11px monospace";
+    ctx.fillText(`${db} dB`, w - 45, h - 4);
+  }, [audioLevel]);
+
   // --- Recording ---
 
+  async function handleGainChange(newGain: number) {
+    setGain(newGain);
+    if (!isTauri) return;
+    try {
+      await invoke("set_recording_gain", { gain: newGain });
+    } catch (e) {
+      console.warn("[Diktat] Gain-Aenderung fehlgeschlagen:", e);
+    }
+  }
+
   async function startRecording() {
+    if (!isTauri) return;
     try {
       setRecording(true);
       setRecordingTime(0);
+      setAudioLevel(0);
+      levelHistoryRef.current = [];
 
-      const deviceName = (await invoke("start_recording")) as string;
-      console.log("[Diktat] Aufnahme gestartet:", deviceName);
+      await invoke("start_recording");
+      console.log("[Diktat] Aufnahme gestartet");
 
       recordingTimerRef.current = setInterval(() => {
         setRecordingTime((prev) => prev + 1);
@@ -504,6 +621,8 @@ function App() {
       recordingTimerRef.current = null;
     }
 
+    if (!isTauri) return;
+
     try {
       const result = (await invoke("stop_recording")) as any;
       console.log("[Diktat] Aufnahme gestoppt:", result.path, `${result.duration_secs.toFixed(1)}s`);
@@ -517,6 +636,7 @@ function App() {
   // --- Export ---
 
   async function handleExport(format: string) {
+    if (!isTauri) return;
     const audioName = audioInfo?.filename || "audio";
     const baseName = audioName.replace(/\.[^.]+$/, "");
 
@@ -678,6 +798,36 @@ function App() {
               Stop {formatDuration(recordingTime)}
             </button>
           )}
+
+          {/* VU-Meter */}
+          <div className="vu-meter-container">
+            <canvas
+              ref={canvasRef}
+              width={280}
+              height={24}
+              className="vu-meter-canvas"
+            />
+            <div className="vu-meter-labels">
+              <span>-60dB</span>
+              <span>-30dB</span>
+              <span>0dB</span>
+            </div>
+          </div>
+
+          {/* Gain-Kontrolle */}
+          <div className="gain-control">
+            <label className="gain-label"> ♪ {gain.toFixed(1)}x</label>
+            <input
+              type="range"
+              min="0.1"
+              max="5.0"
+              step="0.1"
+              value={gain}
+              onChange={(e) => handleGainChange(parseFloat(e.target.value))}
+              className="gain-slider"
+              title={`Eingangsverstaerkung: ${gain.toFixed(1)}x`}
+            />
+          </div>
         </div>
 
         {/* Audio Drop Zone */}

@@ -104,6 +104,14 @@ impl WhisperState {
             .unwrap_or(4);
         params.set_n_threads(num_threads as i32);
 
+        // Anti-Halluzination: Thresholds setzen
+        params.set_no_speech_thold(0.6);
+        params.set_logprob_thold(-1.0);
+
+        // Initial-Prompt auf Deutsch hilft Whisper, korrekt zu erkennen
+        // und verhindert Halluzinationen bei Stille/Rauschen
+        params.set_initial_prompt("Dies ist eine deutsche Audioaufnahme.");
+
         let mut state = ctx
             .create_state()
             .map_err(|e| format!("Whisper-State konnte nicht erstellt werden: {}", e))?;
@@ -117,22 +125,25 @@ impl WhisperState {
             return Err(format!("Ungueltige Segment-Anzahl: {}", num_segments));
         }
 
+        info!("Whisper: {} Segmente erkannt", num_segments);
+
         let mut text = String::new();
         for i in 0..num_segments {
             if let Some(segment) = state.get_segment(i) {
-                match segment.to_str() {
-                    Ok(s) => {
-                        text.push_str(s);
-                        text.push(' ');
-                    }
-                    Err(e) => {
-                        warn!("Segment {} konnte nicht dekodiert werden: {}", i, e);
-                    }
+                let seg_text = segment.to_str().unwrap_or("").trim();
+                if !seg_text.is_empty() {
+                    info!("Whisper Segment {}: \"{}\"", i, seg_text);
+                    text.push_str(seg_text);
+                    text.push(' ');
                 }
+            } else {
+                warn!("Segment {} konnte nicht gelesen werden", i);
             }
         }
 
-        Ok(text.trim().to_string())
+        let result = text.trim().to_string();
+        info!("Whisper Chunk-Ergebnis: {} Zeichen", result.len());
+        Ok(result)
     }
 }
 

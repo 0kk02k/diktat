@@ -108,11 +108,19 @@ async fn check_whisper_model() -> Result<serde_json::Value, String> {
 
 // (save_recording entfernt -- Aufnahme jetzt nativ in Rust via cpal)
 
+/// Setzt das ausgewaehlte Ollama-Modell
+#[tauri::command]
+async fn set_ollama_model(model: String) -> Result<(), String> {
+    ollama::set_model(&model);
+    tracing::info!("Ollama-Modell gesetzt auf: {}", model);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(Mutex::new(whisper::WhisperState::new()))
+        .manage(Arc::new(Mutex::new(whisper::WhisperState::new())))
         .manage(Arc::new(Mutex::new(recording::RecordingState::new())))
         .invoke_handler(tauri::generate_handler![
             check_ollama_status,
@@ -128,7 +136,13 @@ pub fn run() {
             recording::get_recording_gain,
             recording::start_monitoring,
             recording::stop_monitoring,
+            recording::start_live_transcription,
+            recording::list_audio_devices,
+            recording::set_audio_device,
+            set_ollama_model,
             whisper::transcribe_audio,
+            whisper::list_whisper_models,
+            whisper::set_whisper_model,
             workflow::run_workflow,
             export::export_result,
             export::export_srt_file,

@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "Diktat - Lokale Transkription",
-        "width": 1000,
-        "height": 700
+        "title": "Diktat",
+        "width": 600,
+        "height": 800,
+        "resizable": true,
+        "visible": true
       }
     ],
     "security": {

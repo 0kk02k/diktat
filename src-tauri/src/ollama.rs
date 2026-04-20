@@ -13,6 +13,27 @@ const DEFAULT_NUM_CTX: u32 = 32768;
 /// "5m" = 5 Minuten, "0" = sofort entladen, "-1" = fuer immer behalten
 const DEFAULT_KEEP_ALIVE: &str = "5m";
 
+/// Global ausgewaehltes Ollama-Modell (kann zur Laufzeit geaendert werden)
+static SELECTED_MODEL: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
+
+fn get_selected_model() -> String {
+    SELECTED_MODEL
+        .get_or_init(|| std::sync::Mutex::new(DEFAULT_MODEL.to_string()))
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+}
+
+/// Setzt das ausgewaehlte Ollama-Modell
+pub fn set_model(model: &str) {
+    if let Ok(mut guard) = SELECTED_MODEL
+        .get_or_init(|| std::sync::Mutex::new(DEFAULT_MODEL.to_string()))
+        .lock()
+    {
+        *guard = model.to_string();
+    }
+}
+
 /// Globaler HTTP-Client mit Connection-Pooling
 /// Wird mit dem Analyse-Timeout erstellt (300s). Fuer kurze Checks
 /// wird ein separater Client verwendet.
@@ -198,8 +219,9 @@ pub async fn analyze(transcript: &str, task: &str) -> Result<String, String> {
 
     let client = get_http_client();
 
+    let model = get_selected_model();
     let request_body = json!({
-        "model": DEFAULT_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript}
@@ -213,7 +235,7 @@ pub async fn analyze(transcript: &str, task: &str) -> Result<String, String> {
         }
     });
     info!("Ollama Request: model={}, system_prompt_len={}, user_msg_len={}",
-        DEFAULT_MODEL, system_prompt.len(), transcript.len());
+        model, system_prompt.len(), transcript.len());
 
     let response = client
         .post(format!("{}/api/chat", OLLAMA_BASE_URL))
@@ -289,8 +311,9 @@ pub async fn analyze_stream(
 
     let client = get_http_client();
 
+    let model = get_selected_model();
     let request_body = json!({
-        "model": DEFAULT_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript}
@@ -304,7 +327,7 @@ pub async fn analyze_stream(
         }
     });
     info!("Ollama Stream Request: model={}, system_prompt_len={}, user_msg_len={}",
-        DEFAULT_MODEL, system_prompt.len(), transcript.len());
+        model, system_prompt.len(), transcript.len());
 
     let response = client
         .post(format!("{}/api/chat", OLLAMA_BASE_URL))

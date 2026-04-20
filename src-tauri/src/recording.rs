@@ -12,6 +12,12 @@ pub struct RecordingState {
     pub gain: Arc<Mutex<f32>>,
     /// Monitoring-Flag (Pegel anzeigen ohne Aufnahme)
     pub is_monitoring: Arc<AtomicBool>,
+    /// Live-Transkription aktiv
+    pub live_transcribing: Arc<AtomicBool>,
+    /// Bisher transkribierte Samples (Offset fuer Live-Transkription)
+    pub live_transcribed_offset: Arc<Mutex<usize>>,
+    /// Ausgewaehltes Audio-Geraet (None = Standard)
+    pub selected_device: Arc<Mutex<Option<String>>>,
 }
 
 impl RecordingState {
@@ -22,6 +28,9 @@ impl RecordingState {
             sample_rate: Arc::new(Mutex::new(48000)),
             gain: Arc::new(Mutex::new(1.0)),
             is_monitoring: Arc::new(AtomicBool::new(false)),
+            live_transcribing: Arc::new(AtomicBool::new(false)),
+            live_transcribed_offset: Arc::new(Mutex::new(0)),
+            selected_device: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -29,6 +38,58 @@ impl RecordingState {
 // Send+Sync: wir speichern den Stream nicht hier
 unsafe impl Send for RecordingState {}
 unsafe impl Sync for RecordingState {}
+
+/// Listet alle verfuegbaren Audio-Eingabegeraete auf
+#[tauri::command]
+pub async fn list_audio_devices() -> Result<Vec<serde_json::Value>, String> {
+    let host = cpal::default_host();
+    let mut devices = Vec::new();
+
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.name().ok());
+
+    if let Some(input_devices) = host.input_devices().ok() {
+        for device in input_devices {
+            let name = device.name().unwrap_or_else(|_| "Unbekannt".to_string());
+            let is_default = default_name.as_ref().map(|dn| dn == &name).unwrap_or(false);
+
+                // Versuche Sample-Rate-Info zu bekommen
+                let sample_rates: Vec<u32> = device
+                    .supported_input_configs()
+                    .ok()
+                    .map(|configs| {
+                        let mut rates: Vec<u32> = configs
+                            .map(|c| c.min_sample_rate().0)
+                            .collect();
+                        rates.sort();
+                        rates.dedup();
+                        rates
+                    })
+                    .unwrap_or_default();
+
+                devices.push(serde_json::json!({
+                    "name": name,
+                    "is_default": is_default,
+                    "sample_rates": sample_rates,
+                }));
+        }
+    }
+
+    Ok(devices)
+}
+
+/// Setzt das ausgewaehlte Audio-Geraet
+#[tauri::command]
+pub async fn set_audio_device(
+    state: tauri::State<'_, Arc<Mutex<RecordingState>>>,
+    device_name: Option<String>,
+) -> Result<(), String> {
+    let inner = state.lock().map_err(|e| e.to_string())?;
+    let mut dev = inner.selected_device.lock().map_err(|e| e.to_string())?;
+    *dev = device_name;
+    Ok(())
+}
 
 /// Setzt die Aufnahme-Verstaerkung (Gain)
 #[tauri::command]
@@ -204,6 +265,261 @@ pub async fn stop_monitoring(
     Ok(())
 }
 
+/// Startet Live-Transkription waehrend der Aufnahme
+/// Transkribiert alle ~10 Sekunden den aktuellen Sample-Buffer
+#[tauri::command]
+pub async fn start_live_transcription(
+    app: AppHandle,
+    rec_state: tauri::State<'_, Arc<Mutex<RecordingState>>>,
+    whisper_state: tauri::State<'_, Arc<Mutex<crate::whisper::WhisperState>>>,
+    language: Option<String>,
+) -> Result<(), String> {
+    let lang = language.unwrap_or_else(|| "de".to_string());
+
+    // Pruefen ob aufgenommen wird
+    {
+        let inner = rec_state.lock().map_err(|e| e.to_string())?;
+        let is_rec = inner.is_recording.lock().map_err(|e| e.to_string())?;
+        if !*is_rec {
+            return Err("Aufnahme muss laufen bevor Live-Transkription gestartet wird".to_string());
+        }
+    }
+
+    // Nicht doppelt starten
+    {
+        let inner = rec_state.lock().map_err(|e| e.to_string())?;
+        if inner.live_transcribing.load(Ordering::Relaxed) {
+            return Ok(()); // Bereits aktiv
+        }
+    }
+
+    // Live-Transkription aktivieren + Offset zuruecksetzen
+    {
+        let inner = rec_state.lock().map_err(|e| e.to_string())?;
+        inner.live_transcribing.store(true, Ordering::Relaxed);
+        let mut offset = inner.live_transcribed_offset.lock().map_err(|e| e.to_string())?;
+        *offset = 0;
+    }
+
+    // Whisper-Modell laden (falls noch nicht geschehen)
+    {
+        let mut ws = whisper_state.lock().map_err(|e| e.to_string())?;
+        let model_path = crate::whisper::default_model_path();
+        ws.load_model(&model_path)?;
+    }
+
+    // Arcs klonen fuer den Thread
+    let samples_arc = {
+        let inner = rec_state.lock().map_err(|e| e.to_string())?;
+        inner.samples.clone()
+    };
+    let sample_rate_arc = {
+        let inner = rec_state.lock().map_err(|e| e.to_string())?;
+        inner.sample_rate.clone()
+    };
+    let live_active = {
+        let inner = rec_state.lock().map_err(|e| e.to_string())?;
+        inner.live_transcribing.clone()
+    };
+    let live_offset = {
+        let inner = rec_state.lock().map_err(|e| e.to_string())?;
+        inner.live_transcribed_offset.clone()
+    };
+    let is_recording_arc = {
+        let inner = rec_state.lock().map_err(|e| e.to_string())?;
+        inner.is_recording.clone()
+    };
+    let whisper_arc = whisper_state.inner().clone();
+    let app_handle = app.clone();
+
+    std::thread::spawn(move || {
+        info!("Live-Transkription gestartet (Sprache: {})", lang);
+
+        // Status-Event: Start
+        let _ = app_handle.emit(
+            "live-transcription-status",
+            serde_json::json!({
+                "status": "loading",
+                "message": "Whisper-Modell wird geladen...",
+            }),
+        );
+
+        let mut accumulated_text = String::new();
+        let mut chunk_count = 0u32;
+
+        loop {
+            // 3 Sekunden warten
+            std::thread::sleep(std::time::Duration::from_secs(3));
+
+            if !live_active.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // Pruefen ob Aufnahme noch laeuft
+            let still_recording = {
+                let flag = is_recording_arc.lock().unwrap();
+                *flag
+            };
+
+            // Aktuelle Samples holen
+            let new_samples = {
+                let all_samples = samples_arc.lock().unwrap();
+                let current_offset = *live_offset.lock().unwrap();
+
+                if all_samples.len() <= current_offset {
+                    if !still_recording {
+                        break;
+                    }
+                    // Status: Warte auf Audio
+                    let _ = app_handle.emit(
+                        "live-transcription-status",
+                        serde_json::json!({
+                            "status": "waiting",
+                            "message": "Warte auf Audio-Daten...",
+                        }),
+                    );
+                    continue;
+                }
+
+                let new_data = all_samples[current_offset..].to_vec();
+                *live_offset.lock().unwrap() = all_samples.len();
+                new_data
+            };
+
+            if new_samples.is_empty() {
+                if !still_recording {
+                    break;
+                }
+                continue;
+            }
+
+            let sr = *sample_rate_arc.lock().unwrap();
+            let duration_secs = new_samples.len() as f64 / sr as f64;
+
+            // Mindestens 1.5 Sekunden Audio
+            if duration_secs < 1.5 {
+                let all_samples = samples_arc.lock().unwrap();
+                *live_offset.lock().unwrap() = all_samples.len() - new_samples.len();
+                if !still_recording {
+                    break;
+                }
+                continue;
+            }
+
+            chunk_count += 1;
+            info!(
+                "Live-Transkription: {:.1}s neue Audio-Daten ({} Hz)",
+                duration_secs, sr
+            );
+
+            // Status-Event: Transkribiere
+            let _ = app_handle.emit(
+                "live-transcription-status",
+                serde_json::json!({
+                    "status": "transcribing",
+                    "message": format!("Transkribiere Chunk #{} ({:.1}s Audio)...", chunk_count, duration_secs),
+                    "chunk": chunk_count,
+                    "duration_secs": duration_secs,
+                }),
+            );
+
+            // Auf 16kHz resamplen
+            let samples_16k = if sr != 16000 {
+                resample_simple(&new_samples, sr, 16000)
+            } else {
+                new_samples
+            };
+
+            // Whisper transkribieren
+            let transcript_result = {
+                let ws = match whisper_arc.lock() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        error!("Whisper-Lock-Fehler: {}", e);
+                        continue;
+                    }
+                };
+                ws.transcribe_chunk(&samples_16k, Some(&lang))
+            };
+
+            match transcript_result {
+                Ok(text) => {
+                    if !text.trim().is_empty() {
+                        if accumulated_text.is_empty() {
+                            accumulated_text = text.clone();
+                        } else {
+                            accumulated_text = format!("{} {}", accumulated_text, text);
+                        }
+
+                        info!(
+                            "Live-Transkription Chunk: \"{}\" (gesamt: {} Zeichen)",
+                            if text.len() > 60 { &text[..60] } else { &text },
+                            accumulated_text.len()
+                        );
+
+                        // Status-Event: Ergebnis
+                        let _ = app_handle.emit(
+                            "live-transcription-status",
+                            serde_json::json!({
+                                "status": "result",
+                                "message": format!("Chunk #{} transkribiert ({} Zeichen)", chunk_count, accumulated_text.len()),
+                                "chunk": chunk_count,
+                                "total_chars": accumulated_text.len(),
+                            }),
+                        );
+
+                        // Event an Frontend senden
+                        let _ = app_handle.emit(
+                            "live-transcription",
+                            serde_json::json!({
+                                "chunk_text": text,
+                                "accumulated_text": accumulated_text,
+                                "duration_secs": duration_secs,
+                            }),
+                        );
+                    } else {
+                        // Leeres Ergebnis
+                        let _ = app_handle.emit(
+                            "live-transcription-status",
+                            serde_json::json!({
+                                "status": "empty",
+                                "message": format!("Chunk #{} - keine Sprache erkannt", chunk_count),
+                                "chunk": chunk_count,
+                            }),
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!("Live-Transkription Fehler: {}", e);
+                    let _ = app_handle.emit(
+                        "live-transcription-status",
+                        serde_json::json!({
+                            "status": "error",
+                            "message": format!("Fehler bei Chunk #{}: {}", chunk_count, e),
+                        }),
+                    );
+                }
+            }
+        }
+
+        live_active.store(false, Ordering::Relaxed);
+
+        // Status-Event: Beendet
+        let _ = app_handle.emit(
+            "live-transcription-status",
+            serde_json::json!({
+                "status": "done",
+                "message": format!("Transkription beendet ({} Zeichen)", accumulated_text.len()),
+                "total_chars": accumulated_text.len(),
+            }),
+        );
+
+        info!("Live-Transkription beendet (gesamt: {} Zeichen)", accumulated_text.len());
+    });
+
+    Ok(())
+}
+
 /// Startet die Audio-Aufnahme vom Standard-Mikrofon
 #[tauri::command]
 pub async fn start_recording(
@@ -233,13 +549,15 @@ pub async fn start_recording(
         samples.clear();
     }
 
-    let (samples, is_recording, sample_rate_arc, gain_arc) = {
+    let (samples, is_recording, sample_rate_arc, gain_arc, selected_device_name) = {
         let inner = state.lock().map_err(|e| e.to_string())?;
+        let dev_name = inner.selected_device.lock().map_err(|e| e.to_string())?.clone();
         (
             inner.samples.clone(),
             inner.is_recording.clone(),
             inner.sample_rate.clone(),
             inner.gain.clone(),
+            dev_name,
         )
     };
 
@@ -248,9 +566,17 @@ pub async fn start_recording(
     // In einem eigenen Thread starten (cpal::Stream ist nicht Send)
     let _handle = std::thread::spawn(move || -> Result<String, String> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or("Kein Mikrofon gefunden. Bitte ein Mikrofon anschliessen.")?;
+
+        // Ausgewaehltes Geraet oder Standard
+        let device = if let Some(ref dev_name) = selected_device_name {
+            host.input_devices()
+                .map_err(|e| format!("Geraete-Liste Fehler: {}", e))?
+                .find(|d| d.name().map(|n| n == *dev_name).unwrap_or(false))
+                .ok_or_else(|| format!("Audio-Geraet '{}' nicht gefunden", dev_name))?
+        } else {
+            host.default_input_device()
+                .ok_or("Kein Mikrofon gefunden. Bitte ein Mikrofon anschliessen.")?
+        };
 
         let device_name = device
             .name()
@@ -406,6 +732,10 @@ pub async fn stop_recording(
         let mut flag = inner.is_recording.lock().map_err(|e| e.to_string())?;
         *flag = false;
     }
+
+    // Live-Transkription NICHT sofort stoppen - der Thread soll die letzte
+    // Transkription noch fertigstellen. Der Thread beendet sich selbst,
+    // wenn is_recording=false und keine neuen Samples mehr kommen.
 
     // Kurz warten bis Thread beendet
     std::thread::sleep(std::time::Duration::from_millis(300));

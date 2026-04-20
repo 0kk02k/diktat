@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{error, info, warn};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -152,8 +152,9 @@ pub fn default_model_path() -> PathBuf {
     // Relativ zum Arbeitsverzeichnis, oder absolute Pfade pruefen
     let candidates = vec![
         PathBuf::from("models/ggml-large-v3-turbo.bin"),
+        PathBuf::from("models/ggml-small.bin"),
         PathBuf::from("/home/okko/diktat/models/ggml-large-v3-turbo.bin"),
-        PathBuf::from("../models/ggml-large-v3-turbo.bin"),
+        PathBuf::from("/home/okko/diktat/models/ggml-small.bin"),
     ];
 
     for candidate in &candidates {
@@ -164,6 +165,42 @@ pub fn default_model_path() -> PathBuf {
 
     // Fallback: ersten Kandidaten zurueckgeben (wird beim Laden einen Fehler geben)
     candidates.into_iter().next().unwrap()
+}
+
+/// Listet alle verfuegbaren Whisper-Modelle im models/-Verzeichnis auf
+pub fn list_available_models() -> Vec<serde_json::Value> {
+    let models_dir = std::path::Path::new("models");
+    let mut models = Vec::new();
+
+    // Bekannte Modelle mit Metadaten
+    let model_info = [
+        ("ggml-tiny.bin", "Tiny", 75u64, "32x schneller als large, weniger genau"),
+        ("ggml-base.bin", "Base", 150, "16x schneller als large, gute Basis-Qualitaet"),
+        ("ggml-small.bin", "Small", 500, "6x schneller als large, guter Kompromiss"),
+        ("ggml-medium.bin", "Medium", 1500, "2x schneller als large, hohe Qualitaet"),
+        ("ggml-large-v3-turbo.bin", "Large v3 Turbo", 1600, "Beste Qualitaet, langsam auf CPU"),
+        ("ggml-large-v3.bin", "Large v3", 3100, "Beste Qualitaet, sehr langsam auf CPU"),
+    ];
+
+    for (filename, name, approx_size_mb, desc) in &model_info {
+        let path = models_dir.join(filename);
+        let exists = path.exists();
+        let file_size = if exists {
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        models.push(serde_json::json!({
+            "filename": filename,
+            "name": name,
+            "exists": exists,
+            "size_mb": if file_size > 0 { file_size as f64 / (1024.0 * 1024.0) } else { *approx_size_mb as f64 },
+            "description": desc,
+        }));
+    }
+
+    models
 }
 
 /// Tauri-Command: Transkribiert eine Audiodatei komplett
@@ -195,7 +232,7 @@ pub async fn transcribe_audio(
     info!("{} Chunks erstellt", total_chunks);
 
     // Whisper-State holen und Modell laden
-    let state_mutex = app.state::<Mutex<WhisperState>>();
+    let state_mutex = app.state::<Arc<Mutex<WhisperState>>>();
     {
         let mut whisper_state = state_mutex.lock().map_err(|e| e.to_string())?;
         whisper_state.load_model(&mpath)?;
@@ -241,6 +278,9 @@ pub async fn transcribe_audio(
 
         drop(whisper_state);
 
+        // Akkumulierten Text (mit Overlap-Merge) berechnen
+        let accumulated_text = merge_transcripts(&chunk_transcripts);
+
         // Fortschritt an Frontend senden
         let progress = ((i + 1) as f64 / total_chunks as f64) * 100.0;
         let _ = app.emit(
@@ -250,6 +290,7 @@ pub async fn transcribe_audio(
                 "total_chunks": total_chunks,
                 "progress_percent": progress,
                 "current_text": chunk_transcripts.last().map(|c| c.text.clone()).unwrap_or_default(),
+                "accumulated_text": accumulated_text,
             }),
         );
     }
@@ -278,6 +319,33 @@ pub async fn transcribe_audio(
     let _ = app.emit("transcription-complete", &result);
 
     Ok(result)
+}
+
+/// Tauri-Command: Listet verfuegbare Whisper-Modelle auf
+#[tauri::command]
+pub async fn list_whisper_models() -> Result<Vec<serde_json::Value>, String> {
+    Ok(list_available_models())
+}
+
+/// Tauri-Command: Setzt das Whisper-Modell fuer die naechste Transkription
+#[tauri::command]
+pub async fn set_whisper_model(
+    state: State<'_, Arc<Mutex<WhisperState>>>,
+    filename: String,
+) -> Result<String, String> {
+    let path = std::path::Path::new("models").join(&filename);
+    if !path.exists() {
+        return Err(format!("Modell nicht gefunden: {}", filename));
+    }
+
+    let mut ws = state.lock().map_err(|e| format!("Lock-Fehler: {}", e))?;
+    ws.model_path = Some(path);
+
+    // Modell entladen damit es beim naechsten Mal neu geladen wird
+    ws.ctx = None;
+
+    info!("Whisper-Modell gesetzt auf: {}", filename);
+    Ok(filename)
 }
 
 /// Fuegt Chunk-Transkripte zu einem Gesamttext zusammen
@@ -399,6 +467,6 @@ mod tests {
     fn test_default_model_path() {
         let path = default_model_path();
         // Sollte einen Pfad zurueckgeben (existiert moeglicherweise nicht im Test)
-        assert!(path.to_string_lossy().contains("ggml-large-v3-turbo"));
+        assert!(path.to_string_lossy().contains("ggml-small") || path.to_string_lossy().contains("ggml-large-v3-turbo"));
     }
 }

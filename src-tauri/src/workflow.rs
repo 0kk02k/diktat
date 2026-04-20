@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{error, info};
 
@@ -141,7 +142,7 @@ pub async fn run_workflow(
     info!("Lade Whisper-Modell: {:?}", mpath);
 
     // Whisper-Modell laden
-    let state_mutex = app.state::<std::sync::Mutex<whisper::WhisperState>>();
+    let state_mutex = app.state::<Arc<Mutex<whisper::WhisperState>>>();
     {
         let mut whisper_state = state_mutex.lock().map_err(|e| e.to_string())?;
         whisper_state.load_model(&mpath)?;
@@ -176,6 +177,9 @@ pub async fn run_workflow(
 
         drop(whisper_state);
 
+        // Akkumulierten Text (mit Overlap-Merge) berechnen
+        let accumulated_text = whisper::merge_transcripts(&chunk_transcripts);
+
         // Fortschritt senden
         let progress = ((i + 1) as f64 / total_chunks as f64) * 100.0;
         let current_text = chunk_transcripts
@@ -191,9 +195,9 @@ pub async fn run_workflow(
                 "total_chunks": total_chunks,
                 "progress_percent": progress,
                 "current_text": current_text,
+                "accumulated_text": accumulated_text,
             }),
         );
-
         // Workflow-State-Update
         emit_workflow_state(
             &app,

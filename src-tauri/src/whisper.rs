@@ -57,11 +57,9 @@ impl WhisperState {
         }
 
         let ctx_params = WhisperContextParameters::default();
-        let ctx = WhisperContext::new_with_params(
-            model_path.to_string_lossy().as_ref(),
-            ctx_params,
-        )
-        .map_err(|e| format!("Whisper-Modell konnte nicht geladen werden: {}", e))?;
+        let ctx =
+            WhisperContext::new_with_params(model_path.to_string_lossy().as_ref(), ctx_params)
+                .map_err(|e| format!("Whisper-Modell konnte nicht geladen werden: {}", e))?;
 
         self.ctx = Some(ctx);
         self.model_path = Some(model_path.to_path_buf());
@@ -174,12 +172,42 @@ pub fn list_available_models() -> Vec<serde_json::Value> {
 
     // Bekannte Modelle mit Metadaten
     let model_info = [
-        ("ggml-tiny.bin", "Tiny", 75u64, "32x schneller als large, weniger genau"),
-        ("ggml-base.bin", "Base", 150, "16x schneller als large, gute Basis-Qualitaet"),
-        ("ggml-small.bin", "Small", 500, "6x schneller als large, guter Kompromiss"),
-        ("ggml-medium.bin", "Medium", 1500, "2x schneller als large, hohe Qualitaet"),
-        ("ggml-large-v3-turbo.bin", "Large v3 Turbo", 1600, "Beste Qualitaet, langsam auf CPU"),
-        ("ggml-large-v3.bin", "Large v3", 3100, "Beste Qualitaet, sehr langsam auf CPU"),
+        (
+            "ggml-tiny.bin",
+            "Tiny",
+            75u64,
+            "32x schneller als large, weniger genau",
+        ),
+        (
+            "ggml-base.bin",
+            "Base",
+            150,
+            "16x schneller als large, gute Basis-Qualitaet",
+        ),
+        (
+            "ggml-small.bin",
+            "Small",
+            500,
+            "6x schneller als large, guter Kompromiss",
+        ),
+        (
+            "ggml-medium.bin",
+            "Medium",
+            1500,
+            "2x schneller als large, hohe Qualitaet",
+        ),
+        (
+            "ggml-large-v3-turbo.bin",
+            "Large v3 Turbo",
+            1600,
+            "Beste Qualitaet, langsam auf CPU",
+        ),
+        (
+            "ggml-large-v3.bin",
+            "Large v3",
+            3100,
+            "Beste Qualitaet, sehr langsam auf CPU",
+        ),
     ];
 
     for (filename, name, approx_size_mb, desc) in &model_info {
@@ -467,6 +495,9 @@ mod tests {
     fn test_default_model_path() {
         let path = default_model_path();
         // Sollte einen Pfad zurueckgeben (existiert moeglicherweise nicht im Test)
-        assert!(path.to_string_lossy().contains("ggml-small") || path.to_string_lossy().contains("ggml-large-v3-turbo"));
+        assert!(
+            path.to_string_lossy().contains("ggml-small")
+                || path.to_string_lossy().contains("ggml-large-v3-turbo")
+        );
     }
 }

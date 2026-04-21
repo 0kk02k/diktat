@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 /// Ergebnis eines Exports
@@ -9,8 +10,56 @@ pub struct ExportResult {
     pub bytes_written: usize,
 }
 
+fn ensure_parent_dir(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Konnte Zielordner nicht erstellen: {}", e))?;
+    }
+    Ok(())
+}
+
+fn sanitize_filename_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "analyse".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn build_related_output_path(
+    audio_path: &Path,
+    suffix: &str,
+    extension: &str,
+) -> Result<PathBuf, String> {
+    let parent = audio_path
+        .parent()
+        .ok_or_else(|| "Audiopfad hat keinen gueltigen Zielordner".to_string())?;
+    let stem = audio_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Audiodatei hat keinen gueltigen Dateinamen".to_string())?;
+
+    Ok(parent.join(format!("{stem}_{suffix}.{extension}")))
+}
+
 /// Exportiert ein Transkript als einfache Textdatei
-pub fn export_txt(transcript: &str, analysis: Option<&str>, path: &std::path::Path) -> Result<ExportResult, String> {
+pub fn export_txt(
+    transcript: &str,
+    analysis: Option<&str>,
+    path: &std::path::Path,
+) -> Result<ExportResult, String> {
     let mut content = String::new();
     content.push_str("=== Transkript ===\n\n");
     content.push_str(transcript);
@@ -19,8 +68,8 @@ pub fn export_txt(transcript: &str, analysis: Option<&str>, path: &std::path::Pa
         content.push_str(a);
     }
 
-    std::fs::write(path, &content)
-        .map_err(|e| format!("TXT-Export fehlgeschlagen: {}", e))?;
+    ensure_parent_dir(path)?;
+    std::fs::write(path, &content).map_err(|e| format!("TXT-Export fehlgeschlagen: {}", e))?;
 
     info!("TXT exportiert: {:?} ({} Bytes)", path, content.len());
     Ok(ExportResult {
@@ -31,7 +80,12 @@ pub fn export_txt(transcript: &str, analysis: Option<&str>, path: &std::path::Pa
 }
 
 /// Exportiert als Markdown
-pub fn export_markdown(transcript: &str, analysis: Option<&str>, audio_name: &str, path: &std::path::Path) -> Result<ExportResult, String> {
+pub fn export_markdown(
+    transcript: &str,
+    analysis: Option<&str>,
+    audio_name: &str,
+    path: &std::path::Path,
+) -> Result<ExportResult, String> {
     let mut content = String::new();
     content.push_str(&format!("# Transkript: {}\n\n", audio_name));
     content.push_str("## Transkript\n\n");
@@ -40,11 +94,13 @@ pub fn export_markdown(transcript: &str, analysis: Option<&str>, audio_name: &st
         content.push_str("\n\n## Analyse\n\n");
         content.push_str(a);
     }
-    content.push_str(&format!("\n\n---\n*Erstellt mit Diktat am {}*\n", 
-        chrono::Local::now().format("%d.%m.%Y %H:%M")));
+    content.push_str(&format!(
+        "\n\n---\n*Erstellt mit Diktat am {}*\n",
+        chrono::Local::now().format("%d.%m.%Y %H:%M")
+    ));
 
-    std::fs::write(path, &content)
-        .map_err(|e| format!("Markdown-Export fehlgeschlagen: {}", e))?;
+    ensure_parent_dir(path)?;
+    std::fs::write(path, &content).map_err(|e| format!("Markdown-Export fehlgeschlagen: {}", e))?;
 
     info!("Markdown exportiert: {:?} ({} Bytes)", path, content.len());
     Ok(ExportResult {
@@ -73,8 +129,8 @@ pub fn export_json(
     let content = serde_json::to_string_pretty(&data)
         .map_err(|e| format!("JSON-Serialisierung fehlgeschlagen: {}", e))?;
 
-    std::fs::write(path, &content)
-        .map_err(|e| format!("JSON-Export fehlgeschlagen: {}", e))?;
+    ensure_parent_dir(path)?;
+    std::fs::write(path, &content).map_err(|e| format!("JSON-Export fehlgeschlagen: {}", e))?;
 
     info!("JSON exportiert: {:?} ({} Bytes)", path, content.len());
     Ok(ExportResult {
@@ -86,18 +142,25 @@ pub fn export_json(
 
 /// Exportiert als SRT (Untertitel)
 /// Benoetigt Chunk-Informationen mit Zeitstempeln
-pub fn export_srt(chunks: &[(f64, f64, &str)], path: &std::path::Path) -> Result<ExportResult, String> {
+pub fn export_srt(
+    chunks: &[(f64, f64, &str)],
+    path: &std::path::Path,
+) -> Result<ExportResult, String> {
     let mut content = String::new();
 
     for (i, (start, end, text)) in chunks.iter().enumerate() {
         content.push_str(&format!("{}\n", i + 1));
-        content.push_str(&format!("{} --> {}\n", format_srt_time(*start), format_srt_time(*end)));
+        content.push_str(&format!(
+            "{} --> {}\n",
+            format_srt_time(*start),
+            format_srt_time(*end)
+        ));
         content.push_str(text.trim());
         content.push_str("\n\n");
     }
 
-    std::fs::write(path, &content)
-        .map_err(|e| format!("SRT-Export fehlgeschlagen: {}", e))?;
+    ensure_parent_dir(path)?;
+    std::fs::write(path, &content).map_err(|e| format!("SRT-Export fehlgeschlagen: {}", e))?;
 
     info!("SRT exportiert: {:?} ({} Eintraege)", path, chunks.len());
     Ok(ExportResult {
@@ -133,21 +196,25 @@ pub async fn export_result(
     match format.as_str() {
         "txt" => export_txt(&transcript, analysis.as_deref(), export_path),
         "md" => export_markdown(&transcript, analysis.as_deref(), &audio_name, export_path),
-        "json" => export_json(&transcript, analysis.as_deref(), &audio_name, None, export_path),
+        "json" => export_json(
+            &transcript,
+            analysis.as_deref(),
+            &audio_name,
+            None,
+            export_path,
+        ),
         _ => Err(format!("Unbekanntes Export-Format: {}", format)),
     }
 }
 
 /// Tauri-Command: Exportiert als SRT mit Zeitstempel-Daten
 #[tauri::command]
-pub async fn export_srt_file(
-    chunks_json: String,
-    path: String,
-) -> Result<ExportResult, String> {
-    let chunks: Vec<serde_json::Value> = serde_json::from_str(&chunks_json)
-        .map_err(|e| format!("Ungueltige Chunk-Daten: {}", e))?;
+pub async fn export_srt_file(chunks_json: String, path: String) -> Result<ExportResult, String> {
+    let chunks: Vec<serde_json::Value> =
+        serde_json::from_str(&chunks_json).map_err(|e| format!("Ungueltige Chunk-Daten: {}", e))?;
 
-    let srt_chunks: Vec<(f64, f64, &str)> = chunks.iter()
+    let srt_chunks: Vec<(f64, f64, &str)> = chunks
+        .iter()
         .filter_map(|c| {
             let start = c.get("start_secs")?.as_f64()?;
             let end = c.get("end_secs")?.as_f64()?;
@@ -158,6 +225,56 @@ pub async fn export_srt_file(
 
     let export_path = std::path::Path::new(&path);
     export_srt(&srt_chunks, export_path)
+}
+
+#[tauri::command]
+pub async fn auto_export_transcript(
+    audio_path: String,
+    transcript: String,
+    chunks_json: Option<String>,
+) -> Result<Vec<ExportResult>, String> {
+    let audio_path = Path::new(&audio_path);
+    let transcript_path = build_related_output_path(audio_path, "transkript", "txt")?;
+
+    let mut results = vec![export_txt(&transcript, None, &transcript_path)?];
+
+    if let Some(chunks_json) = chunks_json {
+        let chunks: Vec<serde_json::Value> = serde_json::from_str(&chunks_json)
+            .map_err(|e| format!("Ungueltige Chunk-Daten: {}", e))?;
+
+        let srt_chunks: Vec<(f64, f64, &str)> = chunks
+            .iter()
+            .filter_map(|c| {
+                let start = c.get("start_secs")?.as_f64()?;
+                let end = c.get("end_secs")?.as_f64()?;
+                let text = c.get("text")?.as_str()?;
+                Some((start, end, text))
+            })
+            .collect();
+
+        if !srt_chunks.is_empty() {
+            let srt_path = build_related_output_path(audio_path, "untertitel", "srt")?;
+            results.push(export_srt(&srt_chunks, &srt_path)?);
+        }
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+pub async fn auto_export_analysis(
+    audio_path: String,
+    audio_name: String,
+    transcript: String,
+    analysis: String,
+    task: String,
+) -> Result<ExportResult, String> {
+    let audio_path = Path::new(&audio_path);
+    let task_slug = sanitize_filename_component(&task);
+    let analysis_path =
+        build_related_output_path(audio_path, &format!("analyse_{task_slug}"), "md")?;
+
+    export_markdown(&transcript, Some(&analysis), &audio_name, &analysis_path)
 }
 
 #[cfg(test)]
@@ -215,5 +332,24 @@ mod tests {
         assert!(content.contains("Erster Chunk Text"));
         assert!(content.contains("00:00:28,500 --> 00:00:58,500"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_build_related_output_path() {
+        let audio_path = Path::new("recordings/2026-04-20/aufnahme_20260420_140000.wav");
+        let path = build_related_output_path(audio_path, "transkript", "txt").unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("recordings/2026-04-20/aufnahme_20260420_140000_transkript.txt")
+        );
+    }
+
+    #[test]
+    fn test_sanitize_filename_component() {
+        assert_eq!(
+            sanitize_filename_component("Detailed Summary"),
+            "detailed_summary"
+        );
+        assert_eq!(sanitize_filename_component(""), "analyse");
     }
 }

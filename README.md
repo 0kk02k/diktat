@@ -4,7 +4,7 @@ Lokale Transkriptions-App mit KI-gestützter Textanalyse. Alles läuft offline a
 
 ## Was macht Diktat?
 
-1. **Studio (Erfassung)** -- Intuitive Aufnahme über das Mikrofon oder einfacher Datei-Upload (WAV, MP3, FLAC, etc.).
+1. **Studio (Erfassung)** -- Intuitive Aufnahme über das Mikrofon oder einfacher Datei-Upload gängiger Aufnahmeformate wie WAV, MP3, M4A, MP4, AAC, OGG, OPUS, FLAC, AIFF, CAF und WEBM.
 2. **Engine (Verarbeitung)** -- Hochperformante Transkription mit Whisper Large-v3-Turbo ohne Ablenkungen.
 3. **Dokument (Analyse & Export)** -- Edle Texteditor-Ansicht mit 8 KI-Analysemodi und professionellen Exportoptionen.
 

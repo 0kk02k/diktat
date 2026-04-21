@@ -124,7 +124,20 @@ body { min-height: 100vh; overflow-x: hidden; }
 .input-option:hover { border-color: var(--gold-accent); background: #2a2a2a; }
 
 .input-option h3 { font-size: 0.85rem; font-weight: 600; }
-.input-option .icon { font-size: 1.5rem; }
+.input-option .icon {
+  width: 2rem;
+  height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gold-accent);
+  filter: drop-shadow(0 0 10px rgba(212, 175, 55, 0.12));
+}
+
+.input-option .icon svg {
+  width: 1.7rem;
+  height: 1.7rem;
+}
 
 .btn-record-gold {
   background: var(--gold-accent); color: #000;
@@ -284,6 +297,27 @@ body { min-height: 100vh; overflow-x: hidden; }
 .settings-group-compact { display: flex; flex-direction: column; gap: 0.4rem; }
 .settings-group-compact label { font-size: 0.8rem; font-weight: 600; color: var(--gold-accent); }
 .settings-select-compact { background: var(--bg-primary); border: 1px solid var(--border-subtle); color: var(--text-main); padding: 0.5rem; border-radius: 4px; font-size: 0.85rem; }
+
+.runtime-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: rgba(0,0,0,0.18);
+  border: 1px solid var(--border-subtle);
+}
+
+.runtime-line {
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+.runtime-subline {
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
 
 /* --- Feedback --- */
 

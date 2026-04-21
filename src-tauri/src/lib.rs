@@ -5,6 +5,7 @@ mod audio;
 mod export;
 mod ollama;
 mod recording;
+mod runtime;
 mod whisper;
 mod workflow;
 
@@ -90,9 +91,7 @@ async fn check_whisper_model() -> Result<serde_json::Value, String> {
     let path_str = model_path.to_string_lossy().to_string();
 
     let file_size = if exists {
-        std::fs::metadata(&model_path)
-            .map(|m| m.len())
-            .unwrap_or(0)
+        std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0)
     } else {
         0
     };
@@ -122,6 +121,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(Mutex::new(whisper::WhisperState::new())))
         .manage(Arc::new(Mutex::new(recording::RecordingState::new())))
+        .manage(Arc::new(Mutex::new(runtime::RuntimeProfile::default())))
         .invoke_handler(tauri::generate_handler![
             check_ollama_status,
             get_ollama_models,
@@ -146,9 +146,22 @@ pub fn run() {
             workflow::run_workflow,
             export::export_result,
             export::export_srt_file,
+            export::auto_export_transcript,
+            export::auto_export_analysis,
+            runtime::get_runtime_profile,
+            runtime::refresh_runtime_profile,
         ])
         .setup(|app| {
             info!("Diktat App gestartet");
+
+            let runtime_profile = runtime::initialize_runtime_profile(&app.handle().clone());
+            {
+                let runtime_state = app.state::<Arc<Mutex<runtime::RuntimeProfile>>>();
+                if let Ok(mut guard) = runtime_state.lock() {
+                    *guard = runtime_profile.clone();
+                }
+            }
+            let _ = app.handle().emit("runtime-profile-updated", &runtime_profile);
 
             // Ollama-Verfuegbarkeit pruefen
             let handle = app.handle().clone();

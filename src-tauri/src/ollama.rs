@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter};
-use tracing::{info, warn, debug, error};
+use tracing::{debug, error, info, warn};
 
 const OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "gemma4:latest";
@@ -64,6 +64,27 @@ fn get_check_client() -> &'static Client {
     })
 }
 
+async fn parse_ollama_error(response: reqwest::Response) -> String {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(message) = json
+            .get("error")
+            .and_then(|value| value.as_str())
+            .or_else(|| json.get("message").and_then(|value| value.as_str()))
+        {
+            return format!("Ollama-Fehler ({}): {}", status, message);
+        }
+    }
+
+    if body.trim().is_empty() {
+        format!("Ollama-Fehler: HTTP {}", status)
+    } else {
+        format!("Ollama-Fehler ({}): {}", status, body.trim())
+    }
+}
+
 /// Analyse-Tasks mit System-Prompts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AnalysisTask {
@@ -102,59 +123,112 @@ impl AnalysisTask {
 
     pub fn system_prompt(&self) -> &'static str {
         match self {
-            Self::Summary => "Du bist ein professioneller Assistent fuer Transkript-Analyse. \
-                Erstelle eine kurze, praegnante Zusammenfassung des folgenden Transkripts auf Deutsch. \
-                Maximal 3-5 Absaetze. Konzentriere dich auf die Kernaussagen.",
+            Self::Summary => "Du bist ein praeziser Assistent fuer die Analyse von Interviews \
+                und geschäftlichen Gespraechen. Verwende ausschliesslich Informationen aus dem \
+                Transkript. Erfinde keine Namen, Rollen, Motive, Beschluesse, Fristen oder \
+                Zusammenhaenge. Wenn etwas unklar ist, schreibe 'unklar' oder 'nicht explizit \
+                genannt'. Erstelle auf Deutsch eine kurze, belastbare Zusammenfassung mit genau \
+                diesen Abschnitten:\n\
+                ## Kontext\n\
+                (1-2 Saetze zum Anlass oder Thema, falls erkennbar)\n\
+                ## Kernaussagen\n\
+                (3-5 praegnante Stichpunkte mit den wichtigsten Inhalten)\n\
+                ## Ergebnis\n\
+                (kurz: wichtigste Erkenntnis, Einigung oder offener Stand)",
 
-            Self::DetailedSummary => "Du bist ein professioneller Assistent fuer Transkript-Analyse. \
-                Erstelle eine ausfuehrliche Zusammenfassung des folgenden Transkripts auf Deutsch. \
-                Strukturiere sie mit Ueberschriften und Abschnitten. \
-                Gehe auf alle wichtigen Punkte detailliert ein.",
+            Self::DetailedSummary => "Du bist ein praeziser Assistent fuer die Analyse von \
+                Interviews und geschäftlichen Gespraechen. Verwende ausschliesslich Informationen \
+                aus dem Transkript. Erfinde keine Namen, Rollen, Motive, Beschluesse, Fristen \
+                oder Zusammenhaenge. Weise Aussagen nur Personen zu, wenn das im Transkript klar \
+                erkennbar ist; sonst neutral formulieren. Wenn Informationen fehlen, markiere sie \
+                als 'nicht explizit genannt' oder 'unklar'. Erstelle auf Deutsch eine ausfuehrliche \
+                Zusammenfassung mit dieser Struktur:\n\
+                ## Kontext\n\
+                ## Hauptpunkte\n\
+                ## Positionen und Perspektiven\n\
+                (nur wenn im Transkript erkennbar)\n\
+                ## Entscheidungen oder vorlaeufige Ergebnisse\n\
+                ## Offene Fragen und Unsicherheiten\n\
+                ## Naechste Schritte\n\
+                Schreibe praezise, sachlich und ohne Wiederholungen.",
 
-            Self::Topics => "Du bist ein professioneller Assistent fuer Transkript-Analyse. \
-                Extrahiere alle Hauptthemen und Keywords aus dem folgenden Transkript. \
-                Gib jedes Thema als Stichpunkt mit einer kurzen Erklaerung aus. \
-                Sortiere nach Wichtigkeit.",
+            Self::Topics => "Du bist ein praeziser Assistent fuer die Analyse von Interviews \
+                und geschäftlichen Gespraechen. Verwende ausschliesslich Informationen aus dem \
+                Transkript. Extrahiere die Hauptthemen und ordne sie nach Relevanz. Gib fuer jedes \
+                Thema an: \
+                - Thema \
+                - kurze Erklaerung in 1-2 Saetzen \
+                - Einordnung: Hauptthema, Nebenthema oder offener Punkt \
+                Wenn ein Thema nur angedeutet wird, markiere es als 'unklar angedeutet'.",
 
-            Self::Actions => "Du bist ein professioneller Assistent fuer Transkript-Analyse. \
-                Extrahiere alle Aktionspunkte, To-dos, Aufgaben und Verantwortlichkeiten \
-                aus dem folgenden Transkript. Gib sie als nummerierte Liste aus. \
-                Wenn Personen genannt werden, ordne die Aufgaben ihnen zu.",
+            Self::Actions => "Du bist ein praeziser Assistent fuer die Analyse von Interviews \
+                und geschäftlichen Gespraechen. Verwende ausschliesslich Informationen aus dem \
+                Transkript. Extrahiere nur explizit oder sehr klar implizit genannte Aktionspunkte, \
+                To-dos und Folgeaufgaben. Gib sie als nummerierte Liste aus. Fuer jeden Punkt nutze \
+                dieses Schema:\n\
+                1. Aufgabe: ...\n\
+                Verantwortlich: ... / nicht genannt\n\
+                Frist: ... / nicht genannt\n\
+                Grundlage im Gespraech: ...\n\
+                Wenn etwas nicht eindeutig als Aufgabe formuliert ist, fuehre es nicht als \
+                Aktionspunkt auf.",
 
-            Self::Sentiment => "Du bist ein professioneller Assistent fuer Stimmungsanalyse. \
-                Analysiere die Stimmung und den Ton des folgenden Transkripts. \
-                Beschreibe: 1) Die generelle emotionale Tendenz (positiv/neutral/negativ), \
-                2) Markante Stimmungswechsel, 3) Die Dominanz einzelner Sprecher falls erkennbar.",
+            Self::Sentiment => "Du bist ein vorsichtiger Assistent fuer Stimmungsanalyse. \
+                Verwende ausschliesslich Informationen aus dem Transkript und vermeide psychologische \
+                Spekulationen. Analysiere sachlich:\n\
+                1. Grundton des Gespraechs: positiv, neutral, angespannt, kritisch oder gemischt\n\
+                2. Markante Veraenderungen im Tonfall, falls sprachlich erkennbar\n\
+                3. Kommunikationsstil, z. B. kooperativ, defensiv, konflikthaft, loesungsorientiert\n\
+                Weise Stimmungen nur Personen zu, wenn Sprecher klar erkennbar sind. Wenn das nicht \
+                moeglich ist, formuliere neutral auf Gespraechsebene.",
 
-            Self::Decisions => "Du bist ein professioneller Assistent fuer Transkript-Analyse. \
-                Extrahiere alle Beschluesse, Entscheidungen und Einigungen aus dem folgenden Transkript. \
-                Gib jeden Beschluss als nummerierten Punkt aus mit: \
-                - Was wurde beschlossen? \
-                - Wer ist verantwortlich? (falls genannt) \
-                - Gibt es eine Frist? (falls genannt)",
+            Self::Decisions => "Du bist ein praeziser Assistent fuer die Analyse von \
+                geschäftlichen Gespraechen und Interviews. Verwende ausschliesslich Informationen \
+                aus dem Transkript. Extrahiere nur explizit genannte oder eindeutig festgehaltene \
+                Entscheidungen, Einigungen und Festlegungen. Gib jeden Punkt nummeriert aus mit \
+                genau diesem Schema:\n\
+                1. Beschluss oder Einigung: ...\n\
+                Status: beschlossen / vorlaeufig / offen\n\
+                Verantwortlich: ... / nicht genannt\n\
+                Frist: ... / nicht genannt\n\
+                Beleg im Gespraech: ...\n\
+                Wenn etwas diskutiert, aber nicht entschieden wurde, gehoert es nicht in diese \
+                Liste, sondern hoechstens als offener Punkt.",
 
-            Self::Protocol => "Du bist ein professioneller Protokollfuehrer. \
-                Erstelle ein strukturiertes Protokoll aus dem folgenden Transkript. \
-                Verwende dieses Format:\n\
+            Self::Protocol => "Du bist ein praeziser Protokollfuehrer fuer Interviews und \
+                geschäftliche Gespraeche. Verwende ausschliesslich Informationen aus dem Transkript. \
+                Erfinde keine Teilnehmer, Rollen, Beschluesse oder Fristen. Wenn etwas nicht klar \
+                ist, markiere es als 'nicht explizit genannt' oder 'unklar'. Verwende genau dieses \
+                Format:\n\
                 ## Protokoll\n\
+                ### Kontext\n\
+                (Anlass oder Ziel, falls erkennbar)\n\
                 ### Teilnehmer\n\
-                (falls erkennbar)\n\
-                ### Agenda / Themen\n\
-                (Hauptthemen auflisten)\n\
-                ### Diskussion\n\
-                (Zusammenfassung der Diskussionen pro Thema)\n\
-                ### Beschluesse\n\
-                (Entscheidungen und Ergebnisse)\n\
+                (nur klar erkennbare Personen oder 'nicht eindeutig erkennbar')\n\
+                ### Themen\n\
+                (Hauptthemen in Reihenfolge des Gespraechs)\n\
+                ### Kerndiskussion\n\
+                (pro Thema kurz die wesentlichen Aussagen)\n\
+                ### Beschluesse oder Ergebnisse\n\
+                (nur klar belegbare Punkte)\n\
                 ### Aktionspunkte\n\
-                (Aufgaben mit Verantwortlichen und Fristen)",
+                (Aufgabe, verantwortlich, Frist; fehlende Angaben als 'nicht genannt')\n\
+                ### Offene Fragen\n\
+                (nicht geklaerte Punkte)",
 
-            Self::Full => "Du bist ein professioneller Assistent fuer Transkript-Analyse. \
-                Erstelle eine umfassende Analyse des folgenden Transkripts mit folgenden Abschnitten:\n\
-                1. Zusammenfassung (kurz)\n\
-                2. Hauptthemen\n\
-                3. Aktionspunkte\n\
-                4. Beschluesse\n\
-                5. Stimmungsanalyse",
+            Self::Full => "Du bist ein praeziser Assistent fuer die Analyse von Interviews \
+                und geschäftlichen Gespraechen. Verwende ausschliesslich Informationen aus dem \
+                Transkript. Erfinde nichts. Markiere Unsicherheiten klar. Erstelle eine umfassende \
+                Analyse mit genau diesen Abschnitten:\n\
+                1. Kontext und Ziel des Gespraechs\n\
+                2. Kurzfassung der Kernaussagen\n\
+                3. Hauptthemen und Positionen\n\
+                4. Aktionspunkte\n\
+                5. Entscheidungen und Ergebnisse\n\
+                6. Offene Fragen und Risiken\n\
+                7. Kommunikationsstil / Stimmung\n\
+                Schreibe sachlich, strukturiert und fuer die Nachbereitung eines Interviews oder \
+                Business-Gespraechs nutzbar.",
         }
     }
 
@@ -181,6 +255,10 @@ pub async fn check_status() -> Result<serde_json::Value, String> {
         .send()
         .await
         .map_err(|e| format!("Ollama nicht erreichbar: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(parse_ollama_error(response).await);
+    }
 
     let body: serde_json::Value = response
         .json()
@@ -234,8 +312,12 @@ pub async fn analyze(transcript: &str, task: &str) -> Result<String, String> {
             "top_p": 0.9
         }
     });
-    info!("Ollama Request: model={}, system_prompt_len={}, user_msg_len={}",
-        model, system_prompt.len(), transcript.len());
+    info!(
+        "Ollama Request: model={}, system_prompt_len={}, user_msg_len={}",
+        model,
+        system_prompt.len(),
+        transcript.len()
+    );
 
     let response = client
         .post(format!("{}/api/chat", OLLAMA_BASE_URL))
@@ -253,15 +335,20 @@ pub async fn analyze(transcript: &str, task: &str) -> Result<String, String> {
             }
         })?;
 
-    let status = response.status();
-    info!("Ollama Response Status: {}", status);
+    info!("Ollama Response Status: {}", response.status());
+    if !response.status().is_success() {
+        return Err(parse_ollama_error(response).await);
+    }
 
     let body: serde_json::Value = response
         .json()
         .await
         .map_err(|e| format!("Antwort konnte nicht gelesen werden: {}", e))?;
 
-    info!("Ollama Response Keys: {:?}", body.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+    info!(
+        "Ollama Response Keys: {:?}",
+        body.as_object().map(|o| o.keys().collect::<Vec<_>>())
+    );
 
     let content = body["message"]["content"]
         .as_str()
@@ -326,8 +413,12 @@ pub async fn analyze_stream(
             "top_p": 0.9
         }
     });
-    info!("Ollama Stream Request: model={}, system_prompt_len={}, user_msg_len={}",
-        model, system_prompt.len(), transcript.len());
+    info!(
+        "Ollama Stream Request: model={}, system_prompt_len={}, user_msg_len={}",
+        model,
+        system_prompt.len(),
+        transcript.len()
+    );
 
     let response = client
         .post(format!("{}/api/chat", OLLAMA_BASE_URL))
@@ -335,7 +426,12 @@ pub async fn analyze_stream(
         .send()
         .await
         .map_err(|e| {
-            error!("Ollama Stream Request-Fehler: {} (connect={}, timeout={})", e, e.is_connect(), e.is_timeout());
+            error!(
+                "Ollama Stream Request-Fehler: {} (connect={}, timeout={})",
+                e,
+                e.is_connect(),
+                e.is_timeout()
+            );
             if e.is_connect() {
                 "Ollama ist nicht erreichbar. Bitte starte Ollama mit 'ollama serve'.".to_string()
             } else if e.is_timeout() {
@@ -345,29 +441,63 @@ pub async fn analyze_stream(
             }
         })?;
 
-    let status = response.status();
-    info!("Ollama Stream Response Status: {}", status);
+    info!("Ollama Stream Response Status: {}", response.status());
+    if !response.status().is_success() {
+        return Err(parse_ollama_error(response).await);
+    }
 
-    // Streaming: Zeile fuer Zeile lesen
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Streaming-Antwort konnte nicht gelesen werden: {}", e))?;
-
-    let body_text = String::from_utf8_lossy(&bytes);
     let mut full_response = String::new();
+    let mut pending = String::new();
+    let mut response = response;
 
-    for line in body_text.lines() {
-        if line.trim().is_empty() {
-            continue;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("Streaming-Antwort konnte nicht gelesen werden: {}", e))?
+    {
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(line_end) = pending.find('\n') {
+            let line = pending[..line_end].trim().to_string();
+            pending.drain(..=line_end);
+
+            if line.is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<serde_json::Value>(&line) {
+                Ok(json) => {
+                    if let Some(content) = json["message"]["content"].as_str() {
+                        full_response.push_str(content);
+
+                        let _ = app.emit(
+                            "analysis-token",
+                            serde_json::json!({
+                                "token": content,
+                                "task": task,
+                                "accumulated": full_response.len(),
+                            }),
+                        );
+                    }
+
+                    if json["done"].as_bool().unwrap_or(false) {
+                        pending.clear();
+                        break;
+                    }
+                }
+                Err(e) => {
+                    warn!("Ungueltige JSON-Zeile im Stream: {} ({})", line, e);
+                }
+            }
         }
+    }
 
-        match serde_json::from_str::<serde_json::Value>(line) {
+    let trailing = pending.trim();
+    if !trailing.is_empty() {
+        match serde_json::from_str::<serde_json::Value>(trailing) {
             Ok(json) => {
                 if let Some(content) = json["message"]["content"].as_str() {
                     full_response.push_str(content);
-
-                    // Token-Event an Frontend senden
                     let _ = app.emit(
                         "analysis-token",
                         serde_json::json!({
@@ -377,14 +507,9 @@ pub async fn analyze_stream(
                         }),
                     );
                 }
-
-                // Pruefen ob Stream beendet
-                if json["done"].as_bool().unwrap_or(false) {
-                    break;
-                }
             }
             Err(e) => {
-                warn!("Ungueltige JSON-Zeile im Stream: {} ({})", line, e);
+                warn!("Ungueltige JSON-Restzeile im Stream: {} ({})", trailing, e);
             }
         }
     }
@@ -413,23 +538,56 @@ mod tests {
 
     #[test]
     fn test_analysis_task_from_str() {
-        assert!(matches!(AnalysisTask::from_str("summary"), AnalysisTask::Summary));
-        assert!(matches!(AnalysisTask::from_str("topics"), AnalysisTask::Topics));
-        assert!(matches!(AnalysisTask::from_str("actions"), AnalysisTask::Actions));
-        assert!(matches!(AnalysisTask::from_str("sentiment"), AnalysisTask::Sentiment));
-        assert!(matches!(AnalysisTask::from_str("decisions"), AnalysisTask::Decisions));
-        assert!(matches!(AnalysisTask::from_str("protocol"), AnalysisTask::Protocol));
+        assert!(matches!(
+            AnalysisTask::from_str("summary"),
+            AnalysisTask::Summary
+        ));
+        assert!(matches!(
+            AnalysisTask::from_str("topics"),
+            AnalysisTask::Topics
+        ));
+        assert!(matches!(
+            AnalysisTask::from_str("actions"),
+            AnalysisTask::Actions
+        ));
+        assert!(matches!(
+            AnalysisTask::from_str("sentiment"),
+            AnalysisTask::Sentiment
+        ));
+        assert!(matches!(
+            AnalysisTask::from_str("decisions"),
+            AnalysisTask::Decisions
+        ));
+        assert!(matches!(
+            AnalysisTask::from_str("protocol"),
+            AnalysisTask::Protocol
+        ));
         assert!(matches!(AnalysisTask::from_str("full"), AnalysisTask::Full));
         // Unknown -> Summary
-        assert!(matches!(AnalysisTask::from_str("unknown"), AnalysisTask::Summary));
+        assert!(matches!(
+            AnalysisTask::from_str("unknown"),
+            AnalysisTask::Summary
+        ));
     }
 
     #[test]
     fn test_system_prompts_not_empty() {
-        let tasks = vec!["summary", "topics", "actions", "sentiment", "decisions", "protocol", "full"];
+        let tasks = vec![
+            "summary",
+            "topics",
+            "actions",
+            "sentiment",
+            "decisions",
+            "protocol",
+            "full",
+        ];
         for task in tasks {
             let t = AnalysisTask::from_str(task);
-            assert!(!t.system_prompt().is_empty(), "Prompt fuer {} ist leer", task);
+            assert!(
+                !t.system_prompt().is_empty(),
+                "Prompt fuer {} ist leer",
+                task
+            );
         }
     }
 

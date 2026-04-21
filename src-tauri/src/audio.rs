@@ -19,7 +19,18 @@ const TARGET_SAMPLE_RATE: u32 = 16000;
 /// Maximale Audiodauer in Sekunden (4 Stunden)
 const MAX_AUDIO_DURATION_SECS: f64 = 4.0 * 3600.0;
 /// Unterstuetzte Dateiendungen
-const SUPPORTED_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "m4a", "aac", "wma", "opus"];
+const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "wav", "wave", "mp3", "mp2", "mp1", "flac", "ogg", "oga", "opus", "aac", "adts", "m4a", "m4b",
+    "m4p", "mp4", "mov", "qt", "3gp", "3g2", "aif", "aiff", "aifc", "caf", "mka", "mkv", "webm",
+    "weba",
+];
+
+fn is_supported_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| SUPPORTED_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
 
 /// Metadaten eines Audio-Chunks
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,9 +72,9 @@ pub fn load_audio(path: &Path) -> Result<(AudioInfo, Vec<f32>), String> {
     // Dateiendung pruefen
     if let Some(ext) = path.extension() {
         let ext_lower = ext.to_string_lossy().to_lowercase();
-        if !SUPPORTED_EXTENSIONS.contains(&ext_lower.as_str()) {
+        if !is_supported_extension(path) {
             warn!(
-                "Möglicherweise nicht unterstütztes Format: .{} (unterstützt: {})",
+                "Möglicherweise nicht unterstuetztes Format: .{} (unterstuetzt: {})",
                 ext_lower,
                 SUPPORTED_EXTENSIONS.join(", ")
             );
@@ -85,7 +96,8 @@ pub fn load_audio(path: &Path) -> Result<(AudioInfo, Vec<f32>), String> {
         ));
     }
 
-    let file = File::open(path).map_err(|e| format!("Datei konnte nicht geoeffnet werden: {}", e))?;
+    let file =
+        File::open(path).map_err(|e| format!("Datei konnte nicht geoeffnet werden: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
@@ -102,7 +114,13 @@ pub fn load_audio(path: &Path) -> Result<(AudioInfo, Vec<f32>), String> {
 
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &format_opts, &metadata_opts)
-        .map_err(|e| format!("Audio-Format nicht erkannt: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "Audio-Format nicht erkannt: {}. Unterstuetzte Formate: {}",
+                e,
+                SUPPORTED_EXTENSIONS.join(", ")
+            )
+        })?;
 
     let mut format_reader = probed.format;
     let track = format_reader
@@ -140,10 +158,18 @@ pub fn load_audio(path: &Path) -> Result<(AudioInfo, Vec<f32>), String> {
                             let mut mono_sample = 0.0f32;
                             for ch in 0..num_channels {
                                 mono_sample += match audio_buf {
-                                    AudioBufferRef::U8(ref buf) => buf.chan(ch)[frame] as f32 / u8::MAX as f32,
-                                    AudioBufferRef::S16(ref buf) => buf.chan(ch)[frame] as f32 / i16::MAX as f32,
-                                    AudioBufferRef::S24(ref buf) => buf.chan(ch)[frame].0 as f32 / (1i32 << 23) as f32,
-                                    AudioBufferRef::S32(ref buf) => buf.chan(ch)[frame] as f32 / i32::MAX as f32,
+                                    AudioBufferRef::U8(ref buf) => {
+                                        buf.chan(ch)[frame] as f32 / u8::MAX as f32
+                                    }
+                                    AudioBufferRef::S16(ref buf) => {
+                                        buf.chan(ch)[frame] as f32 / i16::MAX as f32
+                                    }
+                                    AudioBufferRef::S24(ref buf) => {
+                                        buf.chan(ch)[frame].0 as f32 / (1i32 << 23) as f32
+                                    }
+                                    AudioBufferRef::S32(ref buf) => {
+                                        buf.chan(ch)[frame] as f32 / i32::MAX as f32
+                                    }
                                     AudioBufferRef::F32(ref buf) => buf.chan(ch)[frame],
                                     AudioBufferRef::F64(ref buf) => buf.chan(ch)[frame] as f32,
                                     _ => 0.0, // Unbekannte Formate werden als 0.0 behandelt
@@ -209,11 +235,7 @@ pub fn load_audio(path: &Path) -> Result<(AudioInfo, Vec<f32>), String> {
 
     info!(
         "Audio geladen: {} ({:.1}s, {} Hz, {} Kanäle, {} Chunks erwartet)",
-        info.filename,
-        info.duration_secs,
-        info.sample_rate,
-        info.channels,
-        info.total_chunks
+        info.filename, info.duration_secs, info.sample_rate, info.channels, info.total_chunks
     );
 
     Ok((info, samples_16k))
@@ -347,5 +369,17 @@ mod tests {
         let resampled = resample(&samples, 16000, 32000).unwrap();
         // Verdopplung der Samplerate -> ca. doppelte Sample-Anzahl
         assert_eq!(resampled.len(), 8);
+    }
+
+    #[test]
+    fn test_supported_extensions_cover_popular_recording_formats() {
+        assert!(is_supported_extension(Path::new("aufnahme.wav")));
+        assert!(is_supported_extension(Path::new("aufnahme.mp4")));
+        assert!(is_supported_extension(Path::new("memo.m4a")));
+        assert!(is_supported_extension(Path::new("call.webm")));
+        assert!(is_supported_extension(Path::new("voice.aiff")));
+        assert!(is_supported_extension(Path::new("podcast.caf")));
+        assert!(is_supported_extension(Path::new("capture.mkv")));
+        assert!(!is_supported_extension(Path::new("legacy.wma")));
     }
 }

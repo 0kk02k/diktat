@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
@@ -32,6 +32,31 @@ interface TranscriptionResult {
   model: string;
 }
 
+interface BackendStatus {
+  mode: string;
+  effective_backend: string;
+  reason: string;
+}
+
+interface SystemHardware {
+  gpu_present: boolean;
+  gpu_vendor?: string | null;
+  gpu_model?: string | null;
+  gpu_backend: string;
+  detection_notes: string[];
+}
+
+interface RuntimeProfile {
+  config_version: number;
+  detected_at: string;
+  os: string;
+  arch: string;
+  first_run_completed: boolean;
+  system: SystemHardware;
+  whisper: BackendStatus;
+  analysis: BackendStatus;
+}
+
 const ANALYSIS_OPTIONS = [
   { key: "summary", label: "Zusammenfassung" },
   { key: "detailed_summary", label: "Ausführlich" },
@@ -48,6 +73,12 @@ const LANGUAGES = [
   { code: "en", label: "English" },
   { code: "fr", label: "Französisch" },
   { code: "auto", label: "Automatisch" },
+];
+
+const RECORDING_FORMATS = [
+  { key: "wav", label: "WAV" },
+  { key: "mp3", label: "MP3" },
+  { key: "m4a", label: "M4A" },
 ];
 
 function formatDuration(secs: number): string {
@@ -92,6 +123,8 @@ function App() {
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [gain, setGain] = useState(1.0);
+  const [recordingFormat, setRecordingFormat] = useState("wav");
+  const [runtimeProfile, setRuntimeProfile] = useState<RuntimeProfile | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // --- Event Listeners ---
@@ -101,6 +134,8 @@ function App() {
       checkOllama();
       checkWhisper();
       loadAudioDevices();
+      loadRecordingGain();
+      loadRuntimeProfile();
       invoke("start_monitoring").catch(() => {});
     }
 
@@ -121,11 +156,10 @@ function App() {
       setStreamingResult((prev) => prev + data.token);
     }) : Promise.resolve(() => {});
 
-    const unlistenAnalysisComplete = isTauri ? listen("analysis-complete", (event) => {
-      const data = event.payload as any;
-      setResult(data.result);
-      setLoading(false);
-      setActiveTask("");
+    const unlistenStartupWarning = isTauri ? listen("startup-warning", (event) => {
+      const data = event.payload as { message?: string };
+      if (!data?.message) return;
+      setStartupWarnings((prev) => prev.includes(data.message!) ? prev : [...prev, data.message!]);
     }) : Promise.resolve(() => {});
 
     const unlistenAudioLevel = isTauri ? listen("audio-level", (event) => {
@@ -133,12 +167,17 @@ function App() {
       setAudioLevel(data.level);
     }) : Promise.resolve(() => {});
 
+    const unlistenRuntimeProfile = isTauri ? listen("runtime-profile-updated", (event) => {
+      setRuntimeProfile(event.payload as RuntimeProfile);
+    }) : Promise.resolve(() => {});
+
     return () => {
       unlistenProgress.then((fn) => fn());
       unlistenComplete.then((fn) => fn());
       unlistenToken.then((fn) => fn());
-      unlistenAnalysisComplete.then((fn) => fn());
+      unlistenStartupWarning.then((fn) => fn());
       unlistenAudioLevel.then((fn) => fn());
+      unlistenRuntimeProfile.then((fn) => fn());
     };
   }, []);
 
@@ -173,7 +212,11 @@ function App() {
       setOllamaStatus("ok");
       const names = (res?.models || []).map((m: any) => m.name);
       setOllamaModels(names);
-      if (names.length > 0 && !selectedOllamaModel) setSelectedOllamaModel(names[0]);
+      if (names.length > 0) {
+        const defaultModel = names[0];
+        setSelectedOllamaModel((current) => current || defaultModel);
+        await invoke("set_ollama_model", { model: defaultModel });
+      }
     } catch { setOllamaStatus("error"); }
   }
 
@@ -189,9 +232,35 @@ function App() {
       const devices = (await invoke("list_audio_devices")) as any[];
       setAudioDevices(devices);
       const def = devices.find((d) => d.is_default);
-      if (def) setSelectedAudioDevice(def.name);
-      else if (devices.length > 0) setSelectedAudioDevice(devices[0].name);
+      const initialDevice = def?.name || devices[0]?.name || "";
+      if (initialDevice) {
+        setSelectedAudioDevice(initialDevice);
+        await invoke("set_audio_device", { deviceName: initialDevice });
+      }
     } catch {}
+  }
+
+  async function loadRecordingGain() {
+    try {
+      const currentGain = (await invoke("get_recording_gain")) as number;
+      setGain(currentGain);
+    } catch {}
+  }
+
+  async function loadRuntimeProfile() {
+    try {
+      const profile = (await invoke("get_runtime_profile")) as RuntimeProfile;
+      setRuntimeProfile(profile);
+    } catch {}
+  }
+
+  async function refreshRuntimeProfile() {
+    try {
+      const profile = (await invoke("refresh_runtime_profile")) as RuntimeProfile;
+      setRuntimeProfile(profile);
+    } catch (e) {
+      setAudioError(`Hardware-Check fehlgeschlagen: ${e}`);
+    }
   }
 
   async function handleAudioFile(path: string) {
@@ -199,6 +268,10 @@ function App() {
     setAudioError("");
     setAudioInfo(null);
     setSelectedFile(path);
+    setTranscript("");
+    setTranscriptChunks([]);
+    setResult("");
+    setStreamingResult("");
     try {
       const res = (await invoke("prepare_chunks", { path })) as any;
       setAudioInfo(res.audio_info);
@@ -206,16 +279,25 @@ function App() {
     finally { setAudioLoading(false); }
   }
 
-  async function startTranscription() {
-    if (!selectedFile) return;
+  async function startTranscription(fileOverride?: string) {
+    const filePath = fileOverride ?? selectedFile;
+    if (!filePath) return;
     setTranscribing(true);
     setTranscript("");
     setResult("");
     setStreamingResult("");
     try {
-      const res = (await invoke("transcribe_audio", { path: selectedFile, language })) as TranscriptionResult;
+      const res = (await invoke("transcribe_audio", { path: filePath, language })) as TranscriptionResult;
       setTranscript(res.full_text);
       setTranscriptChunks(res.chunks);
+      const chunksJson = JSON.stringify(
+        res.chunks.map((c) => ({ start_secs: c.start_secs, end_secs: c.end_secs, text: c.text }))
+      );
+      await invoke("auto_export_transcript", {
+        audioPath: filePath,
+        transcript: res.full_text,
+        chunksJson,
+      });
     } catch (e) { setAudioError(`Fehler: ${e}`); }
     finally { setTranscribing(false); }
   }
@@ -224,7 +306,12 @@ function App() {
     try {
       setRecording(true);
       setRecordingTime(0);
+      setAudioError("");
+      setAudioInfo(null);
       setTranscript("");
+      setTranscriptChunks([]);
+      setResult("");
+      setStreamingResult("");
       await invoke("start_recording");
       recordingTimerRef.current = setInterval(() => setRecordingTime(v => v + 1), 1000);
     } catch (e) { setRecording(false); setAudioError(`Fehler: ${e}`); }
@@ -234,24 +321,36 @@ function App() {
     setRecording(false);
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
     try {
-      const res = (await invoke("stop_recording")) as any;
+      const res = (await invoke("stop_recording", { format: recordingFormat })) as any;
       setAudioInfo({
         duration_secs: res.duration_secs,
         sample_rate: 16000, channels: 1, total_chunks: 0,
         filename: res.filename || "aufnahme.wav", file_size: res.file_size || 0
       });
       setSelectedFile(res.path);
-      setTimeout(() => startTranscription(), 500);
+      setTimeout(() => startTranscription(res.path), 500);
     } catch (e) { setAudioError(`Fehler: ${e}`); }
   }
 
   async function runAnalysis(task: string) {
-    if (!transcript.trim()) return;
+    if (!transcript.trim() || !selectedFile) return;
     setLoading(true);
     setActiveTask(task);
     setResult("");
     setStreamingResult("");
-    try { await invoke("analyze_transcript_stream", { transcript, task }); }
+    try {
+      const finalAnalysis = (await invoke("analyze_transcript_stream", { transcript, task })) as string;
+      setResult(finalAnalysis);
+      await invoke("auto_export_analysis", {
+        audioPath: selectedFile,
+        audioName: audioInfo?.filename || "audio",
+        transcript,
+        analysis: finalAnalysis,
+        task,
+      });
+      setLoading(false);
+      setActiveTask("");
+    }
     catch (e) { setResult(`Fehler: ${e}`); setLoading(false); setActiveTask(""); }
   }
 
@@ -286,6 +385,9 @@ function App() {
         </div>
       </header>
 
+      {startupWarnings.map((warning) => (
+        <div key={warning} className="error-banner-tiny">{warning}</div>
+      ))}
       {audioError && <div className="error-banner-tiny">{audioError}</div>}
 
       {/* Input Section Stack */}
@@ -293,7 +395,14 @@ function App() {
         {!recording ? (
           <div className="input-split">
             <div className="input-option" onClick={startRecording}>
-              <span className="icon">🎙️</span>
+              <span className="icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="9" y="3.5" width="6" height="11" rx="3" />
+                  <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
+                  <path d="M12 17v3.5" />
+                  <path d="M8.5 20.5h7" />
+                </svg>
+              </span>
               <h3>Aufnahme</h3>
               <button className="btn-record-gold">Start</button>
             </div>
@@ -304,7 +413,12 @@ function App() {
               onDragLeave={() => setDragOver(false)}
               onClick={async () => { const s = await open({ multiple: false }); if (s) handleAudioFile(s as string); }}
             >
-              <span className="icon">📂</span>
+              <span className="icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3.5 8.5a2 2 0 0 1 2-2h4l1.6 2H18.5a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+                  <path d="M3.5 10h17" />
+                </svg>
+              </span>
               <h3>Upload</h3>
               <div className="drop-zone-compact">
                 {audioLoading ? "Lade..." : audioInfo ? audioInfo.filename : "Datei wählen"}
@@ -407,6 +521,41 @@ function App() {
           <label>Gain: {gain.toFixed(1)}x</label>
           <input type="range" min="0.1" max="5.0" step="0.1" value={gain} onChange={e => { setGain(parseFloat(e.target.value)); invoke("set_recording_gain", { gain: parseFloat(e.target.value) }); }} style={{accentColor: 'var(--gold-accent)'}} />
         </div>
+
+        <div className="settings-group-compact">
+          <label>Speichern als</label>
+          <select className="settings-select-compact" value={recordingFormat} onChange={e => setRecordingFormat(e.target.value)}>
+            {RECORDING_FORMATS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
+          </select>
+        </div>
+
+        {runtimeProfile && (
+          <div className="settings-group-compact">
+            <label>Hardware-Profil</label>
+            <div className="runtime-card">
+              <div className="runtime-line">
+                <strong>System:</strong> {runtimeProfile.os} / {runtimeProfile.arch}
+              </div>
+              <div className="runtime-line">
+                <strong>GPU:</strong> {runtimeProfile.system.gpu_present
+                  ? `${runtimeProfile.system.gpu_vendor || "Unbekannt"}${runtimeProfile.system.gpu_model ? ` - ${runtimeProfile.system.gpu_model}` : ""}`
+                  : "Keine dedizierte GPU erkannt"}
+              </div>
+              <div className="runtime-line">
+                <strong>Whisper:</strong> {runtimeProfile.whisper.effective_backend}
+              </div>
+              <div className="runtime-subline">{runtimeProfile.whisper.reason}</div>
+              <div className="runtime-line">
+                <strong>Analyse:</strong> {runtimeProfile.analysis.effective_backend}
+              </div>
+              <div className="runtime-subline">{runtimeProfile.analysis.reason}</div>
+              {runtimeProfile.system.detection_notes.length > 0 && (
+                <div className="runtime-subline">{runtimeProfile.system.detection_notes[0]}</div>
+              )}
+              <button className="btn-export-tiny" onClick={refreshRuntimeProfile}>Hardware neu prüfen</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

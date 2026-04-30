@@ -1,6 +1,6 @@
 # Diktat
 
-Lokale Transkriptions-App mit KI-gestützter Textanalyse. Alles läuft offline auf deinem Rechner -- keine Cloud, keine Datenabhängigkeit. Die Premium Edition bietet ein edles Design und einen hochoptimierten Workflow.
+Lokale Transkriptions-App mit KI-gestützter Textanalyse. Alles läuft offline auf deinem Rechner -- keine Cloud, keine Datenabhängigkeit.
 
 ## Was macht Diktat?
 
